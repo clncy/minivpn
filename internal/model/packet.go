@@ -128,6 +128,12 @@ type PacketID uint32
 // PeerID is the type of the P_DATA_V2 peer ID.
 type PeerID [3]byte
 
+// HMAC signature used for tls-auth
+type HMACHeader [20]byte
+
+// Optional timestamp field used for tls-auth (seconds since the epoch)
+type PacketTimestamp uint32
+
 // Packet is an OpenVPN packet.
 type Packet struct {
 	// Opcode is the packet message type (a P_* constant; high 5-bits of
@@ -145,17 +151,23 @@ type Packet struct {
 	// LocalSessionID is the local session ID.
 	LocalSessionID SessionID
 
+	// When tls-auth mode is in use, contains an HMAC of the control packet fields
+	HMAC HMACHeader
+
+	// An additional packet id used for replay protection in tls-auth mode ONLY. A seperate
+	// counter is used that additional includes p_ACK packets
+	ReplayPacketID PacketID
+
+	// Optional timestamp field used for tls-auth (seconds since the epoch)
+	PacketTimestamp PacketTimestamp
+
 	// Acks contains the remote packets we're ACKing.
 	ACKs []PacketID
 
 	// RemoteSessionID is the remote session ID.
 	RemoteSessionID SessionID
 
-	// ID is the packet-id for replay protection. According to the spec: "4 or 8 bytes,
-	// includes sequence number and optional time_t timestamp".
-	//
-	// This library does not use the timestamp.
-	// TODO(ainghazal): use optional.Value (only control packets have packet id)
+	// message packet-id (4 bytes)
 	ID PacketID
 
 	// Payload is the packet's payload.

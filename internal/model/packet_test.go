@@ -113,7 +113,6 @@ func TestOpcode_String(t *testing.T) {
 			if v != k.String() {
 				t.Errorf("bad opcode string: %s", k.String())
 			}
-
 		}
 	})
 	t.Run("unknown opcode representation", func(t *testing.T) {
