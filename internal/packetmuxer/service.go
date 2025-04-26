@@ -12,9 +12,7 @@ import (
 	"github.com/ooni/minivpn/pkg/config"
 )
 
-var (
-	serviceName = "packetmuxer"
-)
+var serviceName = "packetmuxer"
 
 const (
 	// A sufficiently long wakup period to initialize a ticker with.

@@ -37,6 +37,11 @@ type Manager struct {
 	tunnelInfo           model.TunnelInfo
 	tracer               model.HandshakeTracer
 
+	// Additional state required to support tls-auth
+	localControlReplayPacketID model.PacketID
+	localTLSAuthKey            model.TLSAuthKey
+	remoteTLSAuthKey           model.TLSAuthKey
+
 	// Ready is a channel where we signal that we can start accepting data, because we've
 	// successfully generated key material for the data channel.
 	Ready chan any

@@ -8,10 +8,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+
+	"github.com/ooni/minivpn/internal/model"
 )
 
 const (
-	TLS_AUTH_KEY_LENGTH   = 20
 	OVPN_STATIC_KEY_BEGIN = "-----BEGIN OpenVPN Static key V1-----"
 	OVPN_STATIC_KEY_END   = "-----END OpenVPN Static key V1-----"
 )
@@ -28,7 +29,7 @@ func extractKeyData(encoded string) ([]byte, error) {
 }
 
 // Accepts a OpenVPN Static key V1 PEM formatted block and extracts the
-func ExtractTLSAuthKeys(encoded string, direction int) (local []byte, remote []byte, err error) {
+func ExtractTLSAuthKeys(encoded string, direction int) (local model.TLSAuthKey, remote model.TLSAuthKey, err error) {
 	if !strings.HasPrefix(encoded, OVPN_STATIC_KEY_BEGIN) || !strings.HasSuffix(encoded, OVPN_STATIC_KEY_END) {
 		err = errParsingTLSAuth
 		return
@@ -39,27 +40,27 @@ func ExtractTLSAuthKeys(encoded string, direction int) (local []byte, remote []b
 	// keyData can be divided into 4 equal sized "chunks" e.g. [..., a, ..., b]
 	// we only need the first 20 bytes of the chunk to form the key
 	n := len(buf) / 4
-	a := buf[n : n+TLS_AUTH_KEY_LENGTH]
-	b := buf[3*n : 3*n+TLS_AUTH_KEY_LENGTH]
+	a := buf[n : n+model.TLS_AUTH_KEY_LENGTH]
+	b := buf[3*n : 3*n+model.TLS_AUTH_KEY_LENGTH]
 	switch direction {
 	case 0:
-		local = a
-		remote = b
+		copy(local[:], a)
+		copy(remote[:], b)
 	case 1:
-		local = b
-		remote = a
+		copy(local[:], b)
+		copy(remote[:], a)
 	}
 
 	return
 }
 
-func WriteSignature(key []byte, buf *bytes.Buffer) {
+func WriteSignature(key model.TLSAuthKey, buf *bytes.Buffer) {
 	p := buf.Bytes()
 	l1 := 9
 	l2 := 20
 	l3 := 8
 
-	h := hmac.New(crypto.SHA1.New, key)
+	h := hmac.New(crypto.SHA1.New, key[:])
 	a := p[l1+l2 : l1+l2+l3]
 	h.Write(a)
 

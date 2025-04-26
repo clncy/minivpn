@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/hex"
 	"testing"
+
+	"github.com/ooni/minivpn/internal/model"
 )
 
 const keyData = `-----BEGIN OpenVPN Static key V1-----
@@ -40,21 +42,22 @@ func TestExtractTLSAuthKeys(t *testing.T) {
 			t.Errorf("got error for valid key: %v", err)
 		}
 
-		if !bytes.Equal(local, k1) {
+		if !bytes.Equal(local[:], k1) {
 			t.Errorf("incorrect local key returned got=%x want=%x", local, k1)
 		}
 
-		if !bytes.Equal(remote, k0) {
+		if !bytes.Equal(remote[:], k0) {
 			t.Errorf("incorrect remote key returned got=%x want=%x", remote, k0)
 		}
 	})
 }
 
 func TestWriteSignature(t *testing.T) {
-	k1, _ := hex.DecodeString(key1)
+	var k1 model.TLSAuthKey
 	pack, _ := hex.DecodeString("38529034d4d6b753b600000000000000000000000000000000000000000000000167444aed0000000000")
 	want, _ := hex.DecodeString("38529034d4d6b753b69f4a9edd3182c8d4a0c07702a8f7e2e2aefba2990000000167444aed0000000000")
 
+	hex.Decode(k1[:], []byte(key1))
 	t.Run("valid hmac signature calculated", func(t *testing.T) {
 		buf := bytes.NewBuffer(pack)
 		WriteSignature(k1, buf)
