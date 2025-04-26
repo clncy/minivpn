@@ -38,6 +38,7 @@ type Manager struct {
 	tracer               model.HandshakeTracer
 
 	// Additional state required to support tls-auth
+	tlsAuth                    bool
 	localControlReplayPacketID model.PacketID
 	localTLSAuthKey            model.TLSAuthKey
 	remoteTLSAuthKey           model.TLSAuthKey
@@ -53,6 +54,7 @@ type Manager struct {
 // NewManager returns a [Manager] ready to be used.
 func NewManager(config *config.Config) (*Manager, error) {
 	key0 := &DataChannelKey{}
+
 	sessionManager := &Manager{
 		keyID: 0,
 		keys:  []*DataChannelKey{key0},
@@ -91,6 +93,16 @@ func NewManager(config *config.Config) (*Manager, error) {
 		return sessionManager, err
 	}
 	k.AddLocalKey(localKey)
+
+	if len(config.OpenVPNOptions().TLSAuth) != 0 {
+		local, remote, err := ExtractTLSAuthKeys(string(config.OpenVPNOptions().TLSAuth), 1)
+		if err != nil {
+			return sessionManager, err
+		}
+		sessionManager.localTLSAuthKey = local
+		sessionManager.remoteTLSAuthKey = remote
+	}
+
 	return sessionManager, nil
 }
 
@@ -213,6 +225,11 @@ func (m *Manager) localControlPacketIDLocked() (model.PacketID, error) {
 	}
 	m.localControlPacketID++
 	return pid, nil
+}
+
+// Has tls-auth been turned on for this session?
+func (m *Manager) TlsAuthEnabled() bool {
+	return m.tlsAuth
 }
 
 // NegotiationState returns the state of the negotiation.
