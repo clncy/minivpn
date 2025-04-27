@@ -174,55 +174,23 @@ type Packet struct {
 	Payload []byte
 }
 
+// Provides support for tls-auth mode where packets have a different structure that
+// includes an HMAC of the packet contents (for control packets only)
+// TODO: can be extended to support additional modes (tls-crypt/tls-cryptv2)
+type PacketAuth struct {
+	// Used by SerializePacket() to calculate HMAC of packet contents
+	LocalKey *TLSAuthKey
+
+	// Used by ParsePacket() to verify HMAC provided by server
+	RemoteKey *TLSAuthKey
+}
+
+func (a *PacketAuth) TlsAuthEnabled() bool {
+	return a.LocalKey != nil && a.RemoteKey != nil
+}
+
 // ErrPacketTooShort indicates that a packet is too short.
 var ErrPacketTooShort = errors.New("openvpn: packet too short")
-
-// ParsePacket produces a packet after parsing the common header. We assume that
-// the underlying connection has already stripped out the framing.
-func ParsePacket(buf []byte) (*Packet, error) {
-	// a valid packet is larger, but this allows us
-	// to keep parsing a non-data packet.
-	if len(buf) < 2 {
-		return nil, ErrPacketTooShort
-	}
-	// parsing opcode and keyID
-	opcode := Opcode(buf[0] >> 3)
-	keyID := buf[0] & 0x07
-
-	// extract the packet payload and possibly the peerID
-	var (
-		payload []byte
-		peerID  PeerID
-	)
-	switch opcode {
-	case P_DATA_V2:
-		if len(buf) < 4 {
-			return nil, ErrPacketTooShort
-		}
-		copy(peerID[:], buf[1:4])
-		payload = buf[4:]
-	default:
-		payload = buf[1:]
-	}
-
-	// ACKs and control packets require more complex parsing
-	if opcode.IsControl() || opcode == P_ACK_V1 {
-		return parseControlOrACKPacket(opcode, keyID, payload)
-	}
-
-	// otherwise just return the data packet.
-	p := &Packet{
-		Opcode:          opcode,
-		KeyID:           keyID,
-		PeerID:          peerID,
-		LocalSessionID:  [8]byte{},
-		ACKs:            []PacketID{},
-		RemoteSessionID: [8]byte{},
-		ID:              0,
-		Payload:         payload,
-	}
-	return p, nil
-}
 
 // NewPacket returns a packet from the passed arguments: opcode, keyID and a raw payload.
 func NewPacket(opcode Opcode, keyID uint8, payload []byte) *Packet {
@@ -243,6 +211,93 @@ var ErrEmptyPayload = errors.New("openvpn: empty payload")
 
 // ErrParsePacket is a generic packet parse error which may be further qualified.
 var ErrParsePacket = errors.New("openvpn: packet parse error")
+
+// ErrMarshalPacket is the error returned when we cannot marshal a packet.
+var ErrMarshalPacket = errors.New("cannot marshal packet")
+
+// IsControl returns true if the packet is any of the control types.
+func (p *Packet) IsControl() bool {
+	return p.Opcode.IsControl()
+}
+
+// IsData returns true if the packet is of data type.
+func (p *Packet) IsData() bool {
+	return p.Opcode.IsData()
+}
+
+var pingPayload = []byte{0x2A, 0x18, 0x7B, 0xF3, 0x64, 0x1E, 0xB4, 0xCB, 0x07, 0xED, 0x2D, 0x0A, 0x98, 0x1F, 0xC7, 0x48}
+
+// IsPing returns true if this packet matches a openvpn ping packet.
+func (p *Packet) IsPing() bool {
+	return bytes.Equal(pingPayload, p.Payload)
+}
+
+// Log writes an entry in the passed logger with a representation of this packet.
+func (p *Packet) Log(logger Logger, direction Direction) {
+	var dir string
+	switch direction {
+	case DirectionIncoming:
+		dir = "<"
+	case DirectionOutgoing:
+		dir = ">"
+	default:
+		logger.Warnf("wrong direction: %d", direction)
+		return
+	}
+
+	logger.Debugf(
+		"%s %s {id=%d, acks=%v} localID=%x remoteID=%x [%d bytes]",
+		dir,
+		p.Opcode,
+		p.ID,
+		p.ACKs,
+		p.LocalSessionID,
+		p.RemoteSessionID,
+		len(p.Payload),
+	)
+}
+
+// Takes a fully-formed packet and converts to bytes that can be sent down the wire
+func SerializePacket(p *Packet, packetAuth *PacketAuth) ([]byte, error) {
+	buf := &bytes.Buffer{}
+
+	switch p.Opcode {
+	case P_DATA_V2:
+		// we assume this is an encrypted data packet,
+		// so we serialize just the encrypted payload
+
+	default:
+		buf.WriteByte((byte(p.Opcode) << 3) | (p.KeyID & 0x07))
+		buf.Write(p.LocalSessionID[:])
+
+		// tls-auth is enabled, then we need to write additional packet fields
+		if packetAuth.TlsAuthEnabled() {
+			hmacHeader := GeneratePacketHMAC(*packetAuth.LocalKey, p)
+			buf.Write(hmacHeader[:])
+			bytesx.WriteUint32(buf, uint32(p.ReplayPacketID))
+			bytesx.WriteUint32(buf, uint32(p.PacketTimestamp))
+		}
+		// we write a byte with the number of acks, and then serialize each ack.
+		nAcks := len(p.ACKs)
+		if nAcks > math.MaxUint8 {
+			return nil, fmt.Errorf("%w: too many ACKs", ErrMarshalPacket)
+		}
+		buf.WriteByte(byte(nAcks))
+		for i := 0; i < nAcks; i++ {
+			bytesx.WriteUint32(buf, uint32(p.ACKs[i]))
+		}
+		// remote session id
+		if len(p.ACKs) > 0 {
+			buf.Write(p.RemoteSessionID[:])
+		}
+		if p.Opcode != P_ACK_V1 {
+			bytesx.WriteUint32(buf, uint32(p.ID))
+		}
+	}
+	//  payload
+	buf.Write(p.Payload)
+	return buf.Bytes(), nil
+}
 
 // parseControlOrACKPacket parses the contents of a control or ACK packet.
 func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte) (*Packet, error) {
@@ -302,81 +357,49 @@ func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte) (*Packet
 	return p, nil
 }
 
-// ErrMarshalPacket is the error returned when we cannot marshal a packet.
-var ErrMarshalPacket = errors.New("cannot marshal packet")
-
-// Bytes returns a byte array that is ready to be sent on the wire.
-func (p *Packet) Bytes() ([]byte, error) {
-	buf := &bytes.Buffer{}
-
-	switch p.Opcode {
-	case P_DATA_V2:
-		// we assume this is an encrypted data packet,
-		// so we serialize just the encrypted payload
-
-	default:
-		buf.WriteByte((byte(p.Opcode) << 3) | (p.KeyID & 0x07))
-		buf.Write(p.LocalSessionID[:])
-		// we write a byte with the number of acks, and then serialize each ack.
-		nAcks := len(p.ACKs)
-		if nAcks > math.MaxUint8 {
-			return nil, fmt.Errorf("%w: too many ACKs", ErrMarshalPacket)
-		}
-		buf.WriteByte(byte(nAcks))
-		for i := 0; i < nAcks; i++ {
-			bytesx.WriteUint32(buf, uint32(p.ACKs[i]))
-		}
-		// remote session id
-		if len(p.ACKs) > 0 {
-			buf.Write(p.RemoteSessionID[:])
-		}
-		if p.Opcode != P_ACK_V1 {
-			bytesx.WriteUint32(buf, uint32(p.ID))
-		}
+// ParsePacket produces a packet after parsing the common header. We assume that
+// the underlying connection has already stripped out the framing.
+func ParsePacket(buf []byte, packetAuth *PacketAuth) (*Packet, error) {
+	// a valid packet is larger, but this allows us
+	// to keep parsing a non-data packet.
+	if len(buf) < 2 {
+		return nil, ErrPacketTooShort
 	}
-	//  payload
-	buf.Write(p.Payload)
-	return buf.Bytes(), nil
-}
+	// parsing opcode and keyID
+	opcode := Opcode(buf[0] >> 3)
+	keyID := buf[0] & 0x07
 
-// IsControl returns true if the packet is any of the control types.
-func (p *Packet) IsControl() bool {
-	return p.Opcode.IsControl()
-}
-
-// IsData returns true if the packet is of data type.
-func (p *Packet) IsData() bool {
-	return p.Opcode.IsData()
-}
-
-var pingPayload = []byte{0x2A, 0x18, 0x7B, 0xF3, 0x64, 0x1E, 0xB4, 0xCB, 0x07, 0xED, 0x2D, 0x0A, 0x98, 0x1F, 0xC7, 0x48}
-
-// IsPing returns true if this packet matches a openvpn ping packet.
-func (p *Packet) IsPing() bool {
-	return bytes.Equal(pingPayload, p.Payload)
-}
-
-// Log writes an entry in the passed logger with a representation of this packet.
-func (p *Packet) Log(logger Logger, direction Direction) {
-	var dir string
-	switch direction {
-	case DirectionIncoming:
-		dir = "<"
-	case DirectionOutgoing:
-		dir = ">"
-	default:
-		logger.Warnf("wrong direction: %d", direction)
-		return
-	}
-
-	logger.Debugf(
-		"%s %s {id=%d, acks=%v} localID=%x remoteID=%x [%d bytes]",
-		dir,
-		p.Opcode,
-		p.ID,
-		p.ACKs,
-		p.LocalSessionID,
-		p.RemoteSessionID,
-		len(p.Payload),
+	// extract the packet payload and possibly the peerID
+	var (
+		payload []byte
+		peerID  PeerID
 	)
+	switch opcode {
+	case P_DATA_V2:
+		if len(buf) < 4 {
+			return nil, ErrPacketTooShort
+		}
+		copy(peerID[:], buf[1:4])
+		payload = buf[4:]
+	default:
+		payload = buf[1:]
+	}
+
+	// ACKs and control packets require more complex parsing
+	if opcode.IsControl() || opcode == P_ACK_V1 {
+		return parseControlOrACKPacket(opcode, keyID, payload)
+	}
+
+	// otherwise just return the data packet.
+	p := &Packet{
+		Opcode:          opcode,
+		KeyID:           keyID,
+		PeerID:          peerID,
+		LocalSessionID:  [8]byte{},
+		ACKs:            []PacketID{},
+		RemoteSessionID: [8]byte{},
+		ID:              0,
+		Payload:         payload,
+	}
+	return p, nil
 }

@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ooni/minivpn/internal/model"
 	"github.com/ooni/minivpn/internal/optional"
@@ -94,13 +96,23 @@ func NewManager(config *config.Config) (*Manager, error) {
 	}
 	k.AddLocalKey(localKey)
 
-	if len(config.OpenVPNOptions().TLSAuth) != 0 {
-		local, remote, err := ExtractTLSAuthKeys(string(config.OpenVPNOptions().TLSAuth), 1)
+	// Need to load tls-auth from file
+	if len(config.OpenVPNOptions().TLSAuthPath) != 0 {
+
+		authData, err := os.ReadFile(config.OpenVPNOptions().TLSAuthPath)
 		if err != nil {
 			return sessionManager, err
 		}
+
+		// TODO: provide ability to pass in key direction
+		local, remote, err := model.ExtractTLSAuthKeys(string(authData), 1)
+		if err != nil {
+			return sessionManager, err
+		}
+		sessionManager.tlsAuth = true
 		sessionManager.localTLSAuthKey = local
 		sessionManager.remoteTLSAuthKey = remote
+		sessionManager.localControlReplayPacketID = 1
 	}
 
 	return sessionManager, nil
@@ -192,6 +204,12 @@ func (m *Manager) NewHardResetPacket() *model.Packet {
 	// a hard reset will always have packet ID zero
 	packet.ID = 0
 	copy(packet.LocalSessionID[:], m.localSessionID[:])
+
+	// additional fields required by tls-auth mode
+	if m.TlsAuthEnabled() {
+		packet.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
+		packet.ReplayPacketID = 1 // Always 1 for a reset???
+	}
 	return packet
 }
 
@@ -225,11 +243,6 @@ func (m *Manager) localControlPacketIDLocked() (model.PacketID, error) {
 	}
 	m.localControlPacketID++
 	return pid, nil
-}
-
-// Has tls-auth been turned on for this session?
-func (m *Manager) TlsAuthEnabled() bool {
-	return m.tlsAuth
 }
 
 // NegotiationState returns the state of the negotiation.
@@ -339,4 +352,26 @@ func (m *Manager) TunnelInfo() model.TunnelInfo {
 		NetMask: m.tunnelInfo.NetMask,
 		PeerID:  m.tunnelInfo.PeerID,
 	}
+}
+
+func (m *Manager) TlsAuthEnabled() bool {
+	return m.tlsAuth
+}
+
+// Defines how control packets are authenticated (e.g. tls-auth)
+func (m *Manager) PacketAuth() *model.PacketAuth {
+	return &model.PacketAuth{LocalKey: &m.localTLSAuthKey, RemoteKey: &m.remoteTLSAuthKey}
+}
+
+// Very similar to the localControlPacketID, but includes ACKs as well
+func (m *Manager) localControlReplayPacketIDLocked() (model.PacketID, error) {
+	pid := m.localControlReplayPacketID
+
+	// TODO, should we have a seperate error for this case??
+	if pid == math.MaxUint32 {
+		// we reached the max packetID, increment will overflow
+		return 0, ErrExpiredKey
+	}
+	m.localControlReplayPacketID++
+	return pid, nil
 }

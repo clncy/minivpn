@@ -1,11 +1,10 @@
-package session
+package model
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"testing"
-
-	"github.com/ooni/minivpn/internal/model"
 )
 
 const keyData = `-----BEGIN OpenVPN Static key V1-----
@@ -53,7 +52,7 @@ func TestExtractTLSAuthKeys(t *testing.T) {
 }
 
 func TestWriteSignature(t *testing.T) {
-	var k1 model.TLSAuthKey
+	var k1 TLSAuthKey
 	pack, _ := hex.DecodeString("38529034d4d6b753b600000000000000000000000000000000000000000000000167444aed0000000000")
 	want, _ := hex.DecodeString("38529034d4d6b753b69f4a9edd3182c8d4a0c07702a8f7e2e2aefba2990000000167444aed0000000000")
 
@@ -64,6 +63,33 @@ func TestWriteSignature(t *testing.T) {
 
 		if !bytes.Equal(buf.Bytes(), want) {
 			t.Errorf("incorrect local key returned got=%x want=%x", buf.Bytes(), want)
+		}
+	})
+}
+
+func TestGeneratePacketHMAC(t *testing.T) {
+	var k1 TLSAuthKey
+	hex.Decode(k1[:], []byte(key1))
+
+	// pack, _ := hex.DecodeString("38529034d4d6b753b600000000000000000000000000000000000000000000000167444aed0000000000")
+
+	sessionId, _ := hex.DecodeString("529034d4d6b753b6")
+	timestamp, _ := hex.DecodeString("67444aed")
+
+	pack := &Packet{
+		Opcode:          P_CONTROL_HARD_RESET_CLIENT_V2,
+		LocalSessionID:  SessionID(sessionId),
+		PacketTimestamp: PacketTimestamp(binary.BigEndian.Uint32(timestamp)),
+		ReplayPacketID:  1,
+		ID:              0,
+	}
+	want, _ := hex.DecodeString("9f4a9edd3182c8d4a0c07702a8f7e2e2aefba299")
+
+	t.Run("valid hmac signature calculated from packet", func(t *testing.T) {
+		hmac := GeneratePacketHMAC(k1, pack)
+
+		if !bytes.Equal(hmac[:], want) {
+			t.Errorf("incorrect hmac generated got=%x want=%x", hmac[:], want)
 		}
 	})
 }
