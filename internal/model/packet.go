@@ -300,7 +300,7 @@ func SerializePacket(p *Packet, packetAuth *PacketAuth) ([]byte, error) {
 }
 
 // parseControlOrACKPacket parses the contents of a control or ACK packet.
-func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte) (*Packet, error) {
+func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte, packetAuth *PacketAuth) (*Packet, error) {
 	// make sure we have payload to parse and we're parsing control or ACK
 	if len(payload) <= 0 {
 		return nil, ErrEmptyPayload
@@ -317,6 +317,30 @@ func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte) (*Packet
 	// local session id
 	if _, err := io.ReadFull(buf, p.LocalSessionID[:]); err != nil {
 		return p, fmt.Errorf("%w: bad sessionID: %s", ErrParsePacket, err)
+	}
+
+	// additional tls-auth fields
+	if packetAuth.TlsAuthEnabled() {
+		// HMAC header
+		// TODO: calculate HMAC and compare
+		if _, err := io.ReadFull(buf, p.HMAC[:]); err != nil {
+			return p, fmt.Errorf("%w: bad HMAC (tls-auth): %s", ErrParsePacket, err)
+		}
+
+		// replay packet id
+		replayId, err := bytesx.ReadUint32(buf)
+		if err != nil {
+			return p, fmt.Errorf("%w: bad replay packet id (tls-auth): %s", ErrParsePacket, err)
+		}
+		p.ReplayPacketID = PacketID(replayId)
+
+		// timestamp
+		timestamp, err := bytesx.ReadUint32(buf)
+		if err != nil {
+			return p, fmt.Errorf("%w: bad packet timestamp (tls-auth): %s", ErrParsePacket, err)
+		}
+		p.ReplayPacketID = PacketID(timestamp)
+
 	}
 
 	// ack array length
@@ -387,7 +411,7 @@ func ParsePacket(buf []byte, packetAuth *PacketAuth) (*Packet, error) {
 
 	// ACKs and control packets require more complex parsing
 	if opcode.IsControl() || opcode == P_ACK_V1 {
-		return parseControlOrACKPacket(opcode, keyID, payload)
+		return parseControlOrACKPacket(opcode, keyID, payload, packetAuth)
 	}
 
 	// otherwise just return the data packet.

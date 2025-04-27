@@ -112,6 +112,7 @@ func GeneratePacketHMAC(key TLSAuthKey, pack *Packet) HMACHeader {
 	}
 	if pack.Opcode != P_ACK_V1 {
 		bytesx.WriteUint32(c, uint32(pack.ID))
+		c.Write(pack.Payload)
 	}
 	h.Write(c.Bytes())
 

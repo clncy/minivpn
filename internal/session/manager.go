@@ -112,7 +112,9 @@ func NewManager(config *config.Config) (*Manager, error) {
 		sessionManager.tlsAuth = true
 		sessionManager.localTLSAuthKey = local
 		sessionManager.remoteTLSAuthKey = remote
-		sessionManager.localControlReplayPacketID = 1
+
+		// Technically, this should start at 1 but the hard reset packet is hardcoded to 1 so it doesnt get incremented
+		sessionManager.localControlReplayPacketID = 2
 	}
 
 	return sessionManager, nil
@@ -151,6 +153,7 @@ func (m *Manager) NewACKForPacketIDs(ids []model.PacketID) (*model.Packet, error
 	if m.remoteSessionID.IsNone() {
 		return nil, ErrNoRemoteSessionID
 	}
+	// TODO: Could this use NewPacket() instead ?
 	p := &model.Packet{
 		Opcode:          model.P_ACK_V1,
 		KeyID:           m.keyID,
@@ -160,6 +163,15 @@ func (m *Manager) NewACKForPacketIDs(ids []model.PacketID) (*model.Packet, error
 		RemoteSessionID: m.remoteSessionID.Unwrap(),
 		ID:              0,
 		Payload:         []byte{},
+	}
+
+	if m.TlsAuthEnabled() {
+		replayId, err := m.localControlReplayPacketIDLocked()
+		if err != nil {
+			return nil, err
+		}
+		p.ReplayPacketID = replayId
+		p.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
 	}
 	return p, nil
 }
@@ -186,6 +198,15 @@ func (m *Manager) NewPacket(opcode model.Opcode, payload []byte) (*model.Packet,
 	packet.ID = pid
 	if !m.remoteSessionID.IsNone() {
 		packet.RemoteSessionID = m.remoteSessionID.Unwrap()
+	}
+
+	if m.TlsAuthEnabled() && opcode.IsControl() {
+		replayId, err := m.localControlReplayPacketIDLocked()
+		if err != nil {
+			return nil, err
+		}
+		packet.ReplayPacketID = replayId
+		packet.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
 	}
 	return packet, nil
 }
