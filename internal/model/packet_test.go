@@ -224,7 +224,7 @@ func Test_ParsePacket(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			raw, _ := hex.DecodeString(tt.raw)
-			pa := &PacketAuth{Mode: AuthModeNone}
+			pa := &PacketAuth{Mode: ControlAuthModeNone}
 			p, err := ParsePacket(raw, pa)
 			if !errors.Is(err, tt.wantErr) {
 				t.Errorf("got error=%v, want %v", err, tt.wantErr)
@@ -243,7 +243,7 @@ func Test_ParsePacket(t *testing.T) {
 func Test_Packet_Bytes(t *testing.T) {
 	t.Run("serialize a bare mininum packet", func(t *testing.T) {
 		p := &Packet{Opcode: P_ACK_V1}
-		pa := &PacketAuth{Mode: AuthModeNone}
+		pa := &PacketAuth{Mode: ControlAuthModeNone}
 		got, err := SerializePacket(p, pa)
 		if err != nil {
 			t.Error("should not fail")
@@ -280,7 +280,7 @@ func Test_Packet_Bytes(t *testing.T) {
 			Opcode: P_ACK_V1,
 			ACKs:   tooManyAcks,
 		}
-		pa := &PacketAuth{Mode: AuthModeNone}
+		pa := &PacketAuth{Mode: ControlAuthModeNone}
 		_, err := SerializePacket(p, pa)
 
 		if !errors.Is(err, ErrMarshalPacket) {
@@ -386,7 +386,7 @@ func Test_Crash_WhileParsingServerHardResetPacket(t *testing.T) {
 		0,
 		[]byte{},
 	)
-	pa := &PacketAuth{Mode: AuthModeNone}
+	pa := &PacketAuth{Mode: ControlAuthModeNone}
 	b, _ := SerializePacket(packet, pa)
 	ParsePacket(b, pa)
 }

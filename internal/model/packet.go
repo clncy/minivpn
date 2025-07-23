@@ -174,12 +174,12 @@ type Packet struct {
 	Payload []byte
 }
 
-type AuthMode int
+type ControlAuthMode int
 
 const (
-	AuthModeNone AuthMode = iota
-	AuthModeTLSAuth
-	AuthModeTLSCrypt
+	ControlAuthModeNone ControlAuthMode = iota
+	ControlAuthModeTLSAuth
+	ControlAuthModeTLSCrypt
 )
 
 // Provides support for tls-auth mode where packets have a different structure that
@@ -187,7 +187,7 @@ const (
 // TODO: can be extended to support additional modes (tls-crypt/tls-cryptv2)
 type PacketAuth struct {
 	// Determines the type of control channel security in use
-	Mode AuthMode
+	Mode ControlAuthMode
 
 	// Used by SerializePacket() to calculate HMAC of packet contents
 	LocalKey *TLSAuthKey
@@ -197,7 +197,7 @@ type PacketAuth struct {
 }
 
 func (a *PacketAuth) TLSAuthEnabled() bool {
-	return a.Mode == AuthModeTLSAuth
+	return a.Mode == ControlAuthModeTLSAuth
 }
 
 // ErrPacketTooShort indicates that a packet is too short.

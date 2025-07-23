@@ -109,7 +109,7 @@ func NewManager(config *config.Config) (*Manager, error) {
 		}
 
 		sessionManager.packetAuth = &model.PacketAuth{
-			Mode:      model.AuthModeTLSAuth,
+			Mode:      model.ControlAuthModeTLSAuth,
 			LocalKey:  &local,
 			RemoteKey: &remote,
 		}
@@ -118,7 +118,7 @@ func NewManager(config *config.Config) (*Manager, error) {
 		sessionManager.localControlReplayPacketID = 2
 	} else {
 		sessionManager.packetAuth = &model.PacketAuth{
-			Mode: model.AuthModeTLSAuth,
+			Mode: model.ControlAuthModeTLSAuth,
 		}
 
 	}
