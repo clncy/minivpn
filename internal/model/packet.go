@@ -174,10 +174,21 @@ type Packet struct {
 	Payload []byte
 }
 
+type AuthMode int
+
+const (
+	AuthModeNone AuthMode = iota
+	AuthModeTLSAuth
+	AuthModeTLSCrypt
+)
+
 // Provides support for tls-auth mode where packets have a different structure that
 // includes an HMAC of the packet contents (for control packets only)
 // TODO: can be extended to support additional modes (tls-crypt/tls-cryptv2)
 type PacketAuth struct {
+	// Determines the type of control channel security in use
+	Mode AuthMode
+
 	// Used by SerializePacket() to calculate HMAC of packet contents
 	LocalKey *TLSAuthKey
 
@@ -185,8 +196,8 @@ type PacketAuth struct {
 	RemoteKey *TLSAuthKey
 }
 
-func (a *PacketAuth) TlsAuthEnabled() bool {
-	return a.LocalKey != nil && a.RemoteKey != nil
+func (a *PacketAuth) TLSAuthEnabled() bool {
+	return a.Mode == AuthModeTLSAuth
 }
 
 // ErrPacketTooShort indicates that a packet is too short.
@@ -271,7 +282,7 @@ func SerializePacket(p *Packet, packetAuth *PacketAuth) ([]byte, error) {
 		buf.Write(p.LocalSessionID[:])
 
 		// tls-auth is enabled, then we need to write additional packet fields
-		if packetAuth.TlsAuthEnabled() {
+		if packetAuth.TLSAuthEnabled() {
 			hmacHeader := GeneratePacketHMAC(*packetAuth.LocalKey, p)
 			buf.Write(hmacHeader[:])
 			bytesx.WriteUint32(buf, uint32(p.ReplayPacketID))
@@ -320,7 +331,7 @@ func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte, packetAu
 	}
 
 	// additional tls-auth fields
-	if packetAuth.TlsAuthEnabled() {
+	if packetAuth.TLSAuthEnabled() {
 		// HMAC header
 		// TODO: calculate HMAC and compare
 		if _, err := io.ReadFull(buf, p.HMAC[:]); err != nil {

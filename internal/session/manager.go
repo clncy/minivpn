@@ -40,10 +40,8 @@ type Manager struct {
 	tracer               model.HandshakeTracer
 
 	// Additional state required to support tls-auth
-	tlsAuth                    bool
+	packetAuth                 *model.PacketAuth
 	localControlReplayPacketID model.PacketID
-	localTLSAuthKey            model.TLSAuthKey
-	remoteTLSAuthKey           model.TLSAuthKey
 
 	// Ready is a channel where we signal that we can start accepting data, because we've
 	// successfully generated key material for the data channel.
@@ -109,12 +107,20 @@ func NewManager(config *config.Config) (*Manager, error) {
 		if err != nil {
 			return sessionManager, err
 		}
-		sessionManager.tlsAuth = true
-		sessionManager.localTLSAuthKey = local
-		sessionManager.remoteTLSAuthKey = remote
 
-		// Technically, this should start at 1 but the hard reset packet is hardcoded to 1 so it doesnt get incremented
+		sessionManager.packetAuth = &model.PacketAuth{
+			Mode:      model.AuthModeTLSAuth,
+			LocalKey:  &local,
+			RemoteKey: &remote,
+		}
+
+		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
 		sessionManager.localControlReplayPacketID = 2
+	} else {
+		sessionManager.packetAuth = &model.PacketAuth{
+			Mode: model.AuthModeTLSAuth,
+		}
+
 	}
 
 	return sessionManager, nil
@@ -165,7 +171,7 @@ func (m *Manager) NewACKForPacketIDs(ids []model.PacketID) (*model.Packet, error
 		Payload:         []byte{},
 	}
 
-	if m.TlsAuthEnabled() {
+	if m.TLSAuthEnabled() {
 		replayId, err := m.localControlReplayPacketIDLocked()
 		if err != nil {
 			return nil, err
@@ -200,7 +206,7 @@ func (m *Manager) NewPacket(opcode model.Opcode, payload []byte) (*model.Packet,
 		packet.RemoteSessionID = m.remoteSessionID.Unwrap()
 	}
 
-	if m.TlsAuthEnabled() && opcode.IsControl() {
+	if m.TLSAuthEnabled() && opcode.IsControl() {
 		replayId, err := m.localControlReplayPacketIDLocked()
 		if err != nil {
 			return nil, err
@@ -227,7 +233,7 @@ func (m *Manager) NewHardResetPacket() *model.Packet {
 	copy(packet.LocalSessionID[:], m.localSessionID[:])
 
 	// additional fields required by tls-auth mode
-	if m.TlsAuthEnabled() {
+	if m.TLSAuthEnabled() {
 		packet.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
 		packet.ReplayPacketID = 1 // Always 1 for a reset???
 	}
@@ -375,13 +381,13 @@ func (m *Manager) TunnelInfo() model.TunnelInfo {
 	}
 }
 
-func (m *Manager) TlsAuthEnabled() bool {
-	return m.tlsAuth
+func (m *Manager) TLSAuthEnabled() bool {
+	return m.PacketAuth().TLSAuthEnabled()
 }
 
 // Defines how control packets are authenticated (e.g. tls-auth)
 func (m *Manager) PacketAuth() *model.PacketAuth {
-	return &model.PacketAuth{LocalKey: &m.localTLSAuthKey, RemoteKey: &m.remoteTLSAuthKey}
+	return m.packetAuth
 }
 
 // Very similar to the localControlPacketID, but includes ACKs as well
