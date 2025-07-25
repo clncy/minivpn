@@ -8,15 +8,20 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/ooni/minivpn/internal/bytesx"
 )
 
+// The auth keys provided by the server are 64 bytes, but tls-auth
+// only uses the first 20
+const AUTH_KEY_TOTAL_LENGTH = 64
 const TLS_AUTH_KEY_LENGTH = 20
+const TLS_CRYPT_KEY_LENGTH = 32
 
 // Key used for generating/verifying HMAC
-type TLSAuthKey [TLS_AUTH_KEY_LENGTH]byte
+type AuthKey [64]byte
 
 const (
 	OVPN_STATIC_KEY_BEGIN = "-----BEGINOpenVPNStatickeyV1-----"
@@ -36,14 +41,14 @@ func extractKeyData(encoded string) ([]byte, error) {
 }
 
 // Accepts a OpenVPN Static key V1 PEM formatted block and extracts the
-func ExtractTLSAuthKeys(encoded string, direction int) (local TLSAuthKey, remote TLSAuthKey, err error) {
+func ExtractTLSAuthKeys(encoded string, direction int) (local AuthKey, remote AuthKey, err error) {
 	buf, err := extractKeyData(encoded)
 
 	// keyData can be divided into 4 equal sized "chunks" e.g. [..., a, ..., b]
 	// we only need the first 20 bytes of the chunk to form the key
 	n := len(buf) / 4
-	a := buf[n : n+TLS_AUTH_KEY_LENGTH]
-	b := buf[3*n : 3*n+TLS_AUTH_KEY_LENGTH]
+	a := buf[n : n+AUTH_KEY_TOTAL_LENGTH]
+	b := buf[3*n : 3*n+AUTH_KEY_TOTAL_LENGTH]
 	switch direction {
 	case 0:
 		copy(local[:], a)
@@ -56,32 +61,29 @@ func ExtractTLSAuthKeys(encoded string, direction int) (local TLSAuthKey, remote
 	return
 }
 
-func WriteSignature(key TLSAuthKey, buf *bytes.Buffer) {
-	p := buf.Bytes()
-	l1 := 9
-	l2 := 20
-	l3 := 8
+// Accepts a OpenVPN Static key V1 PEM formatted block and extracts the
+func ExtractTLSCryptKeys(encoded string, direction int) (local AuthKey, remote AuthKey, err error) {
+	buf, err := extractKeyData(encoded)
 
-	h := hmac.New(crypto.SHA1.New, key[:])
-	a := p[l1+l2 : l1+l2+l3]
-	h.Write(a)
-
-	b := p[0:l1]
-	h.Write(b)
-
-	c := p[l1+l2+l3:]
-	h.Write(c)
-
-	sig := h.Sum(nil)
-	j := l1
-	for i := 0; i < len(sig); i++ {
-		p[j] = sig[i]
-		j++
+	// keyData can be divided into 4 equal sized "chunks" e.g. [..., a, ..., b]
+	// we only need the first 20 bytes of the chunk to form the key
+	n := len(buf) / 4
+	a := buf[n : n+AUTH_KEY_TOTAL_LENGTH]
+	b := buf[3*n : 3*n+AUTH_KEY_TOTAL_LENGTH]
+	switch direction {
+	case 0:
+		copy(local[:], a)
+		copy(remote[:], b)
+	case 1:
+		copy(local[:], b)
+		copy(remote[:], a)
 	}
+
+	return
 }
 
-func GeneratePacketHMAC(key TLSAuthKey, pack *Packet) HMACHeader {
-	h := hmac.New(crypto.SHA1.New, key[:])
+func GeneratePacketHMAC(key AuthKey, pack *Packet) SHA1HMACHeader {
+	h := hmac.New(crypto.SHA1.New, key[:TLS_AUTH_KEY_LENGTH])
 
 	// a = (replay_packet_id | timestamp)
 	a := make([]byte, 8)
@@ -117,5 +119,44 @@ func GeneratePacketHMAC(key TLSAuthKey, pack *Packet) HMACHeader {
 	h.Write(c.Bytes())
 
 	sig := h.Sum(nil)
-	return HMACHeader(sig)
+	return SHA1HMACHeader(sig)
+}
+
+// refactor!
+func GeneratePacketHMACTLSCrypt(key AuthKey, pack *Packet) SHA256HMACHeader {
+	h := hmac.New(crypto.SHA256.New, key[:TLS_CRYPT_KEY_LENGTH])
+	fmt.Printf("key=%x\n", key[:TLS_CRYPT_KEY_LENGTH])
+
+	// header = first 17 bytes (opcode | key_id | session_id | replay_packet_id | timestamp)
+	header := make([]byte, 17)
+	header[0] = byte(pack.Opcode << 3)
+	copy(header[1:9], pack.LocalSessionID[:])
+	binary.BigEndian.PutUint32(header[9:13], uint32(pack.ReplayPacketID))
+	binary.BigEndian.PutUint32(header[13:17], uint32(pack.PacketTimestamp))
+
+	fmt.Printf("header=%x\n", header)
+	h.Write(header)
+
+	ctrl := &bytes.Buffer{}
+	// we write a byte with the number of acks, and then serialize each ack.
+	nAcks := len(pack.ACKs)
+	ctrl.WriteByte(byte(nAcks))
+	for i := 0; i < nAcks; i++ {
+		bytesx.WriteUint32(ctrl, uint32(pack.ACKs[i]))
+	}
+	// remote session id
+	if len(pack.ACKs) > 0 {
+		ctrl.Write(pack.RemoteSessionID[:])
+	}
+	if pack.Opcode != P_ACK_V1 {
+		// Message-level packet id
+		bytesx.WriteUint32(ctrl, uint32(pack.ID))
+		ctrl.Write(pack.Payload)
+	}
+	fmt.Printf("crtl=%x\n", ctrl)
+	h.Write(ctrl.Bytes())
+
+	sig := h.Sum(nil)
+	fmt.Printf("hmac=%x\n", sig)
+	return SHA256HMACHeader(sig)
 }

@@ -129,7 +129,10 @@ type PacketID uint32
 type PeerID [3]byte
 
 // HMAC signature used for tls-auth
-type HMACHeader [20]byte
+type SHA1HMACHeader [20]byte
+
+// HMAC signature used for tls-crypt
+type SHA256HMACHeader [32]byte
 
 // Optional timestamp field used for tls-auth (seconds since the epoch)
 type PacketTimestamp uint32
@@ -152,7 +155,10 @@ type Packet struct {
 	LocalSessionID SessionID
 
 	// When tls-auth mode is in use, contains an HMAC of the control packet fields
-	HMAC HMACHeader
+	SHA1HMAC SHA1HMACHeader
+
+	// When tls-crypt mode is in use, contains an HMAC of the control packet fields
+	SHA256HMAC SHA256HMACHeader
 
 	// An additional packet id used for replay protection in tls-auth mode ONLY. A seperate
 	// counter is used that additional includes p_ACK packets
@@ -190,10 +196,10 @@ type PacketAuth struct {
 	Mode ControlAuthMode
 
 	// Used by SerializePacket() to calculate HMAC of packet contents
-	LocalKey *TLSAuthKey
+	LocalKey *AuthKey
 
 	// Used by ParsePacket() to verify HMAC provided by server
-	RemoteKey *TLSAuthKey
+	RemoteKey *AuthKey
 }
 
 func (a *PacketAuth) TLSAuthEnabled() bool {
@@ -282,32 +288,70 @@ func SerializePacket(p *Packet, packetAuth *PacketAuth) ([]byte, error) {
 		buf.Write(p.LocalSessionID[:])
 
 		// tls-auth is enabled, then we need to write additional packet fields
-		if packetAuth.TLSAuthEnabled() {
+		switch packetAuth.Mode {
+
+		case ControlAuthModeNone:
+			err := writeACKDataToBuffer(buf, p)
+			if err != nil {
+				return nil, err
+			}
+			if p.Opcode != P_ACK_V1 {
+				bytesx.WriteUint32(buf, uint32(p.ID))
+			}
+			//  payload
+			buf.Write(p.Payload)
+
+		case ControlAuthModeTLSAuth:
 			hmacHeader := GeneratePacketHMAC(*packetAuth.LocalKey, p)
 			buf.Write(hmacHeader[:])
 			bytesx.WriteUint32(buf, uint32(p.ReplayPacketID))
 			bytesx.WriteUint32(buf, uint32(p.PacketTimestamp))
-		}
-		// we write a byte with the number of acks, and then serialize each ack.
-		nAcks := len(p.ACKs)
-		if nAcks > math.MaxUint8 {
-			return nil, fmt.Errorf("%w: too many ACKs", ErrMarshalPacket)
-		}
-		buf.WriteByte(byte(nAcks))
-		for i := 0; i < nAcks; i++ {
-			bytesx.WriteUint32(buf, uint32(p.ACKs[i]))
-		}
-		// remote session id
-		if len(p.ACKs) > 0 {
-			buf.Write(p.RemoteSessionID[:])
-		}
-		if p.Opcode != P_ACK_V1 {
-			bytesx.WriteUint32(buf, uint32(p.ID))
+
+			err := writeACKDataToBuffer(buf, p)
+			if err != nil {
+				return nil, err
+			}
+			if p.Opcode != P_ACK_V1 {
+				bytesx.WriteUint32(buf, uint32(p.ID))
+			}
+			//  payload
+			buf.Write(p.Payload)
+
+		// Note HMAC header is in a different position than tls-auth
+		case ControlAuthModeTLSCrypt:
+			bytesx.WriteUint32(buf, uint32(p.ReplayPacketID))
+			bytesx.WriteUint32(buf, uint32(p.PacketTimestamp))
+
+			hmacHeader := GeneratePacketHMACTLSCrypt(*packetAuth.LocalKey, p)
+			buf.Write(hmacHeader[:])
+
+			// err := writeACKDataToBuffer(buf, p)
+			// if err != nil {
+			// 	return nil, err
+			// }
+
 		}
 	}
-	//  payload
-	buf.Write(p.Payload)
 	return buf.Bytes(), nil
+}
+
+func writeACKDataToBuffer(buf *bytes.Buffer, p *Packet) error {
+	// we write a byte with the number of acks, and then serialize each ack.
+	nAcks := len(p.ACKs)
+	if nAcks > math.MaxUint8 {
+		return fmt.Errorf("%w: too many ACKs", ErrMarshalPacket)
+	}
+	buf.WriteByte(byte(nAcks))
+	for i := 0; i < nAcks; i++ {
+		bytesx.WriteUint32(buf, uint32(p.ACKs[i]))
+	}
+	// remote session id
+	if len(p.ACKs) > 0 {
+		buf.Write(p.RemoteSessionID[:])
+	}
+
+	return nil
+
 }
 
 // parseControlOrACKPacket parses the contents of a control or ACK packet.
@@ -331,10 +375,10 @@ func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte, packetAu
 	}
 
 	// additional tls-auth fields
-	if packetAuth.TLSAuthEnabled() {
+	if packetAuth.Mode == ControlAuthModeTLSAuth {
 		// HMAC header
 		// TODO: calculate HMAC and compare
-		if _, err := io.ReadFull(buf, p.HMAC[:]); err != nil {
+		if _, err := io.ReadFull(buf, p.SHA1HMAC[:]); err != nil {
 			return p, fmt.Errorf("%w: bad HMAC (tls-auth): %s", ErrParsePacket, err)
 		}
 

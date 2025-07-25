@@ -96,7 +96,6 @@ func NewManager(config *config.Config) (*Manager, error) {
 
 	// Need to load tls-auth from file
 	if len(config.OpenVPNOptions().TLSAuthPath) != 0 {
-
 		authData, err := os.ReadFile(config.OpenVPNOptions().TLSAuthPath)
 		if err != nil {
 			return sessionManager, err
@@ -116,9 +115,29 @@ func NewManager(config *config.Config) (*Manager, error) {
 
 		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
 		sessionManager.localControlReplayPacketID = 2
+	} else if len(config.OpenVPNOptions().TLSCryptPath) != 0 {
+		authData, err := os.ReadFile(config.OpenVPNOptions().TLSCryptPath)
+		if err != nil {
+			return sessionManager, err
+		}
+
+		// TODO: provide ability to pass in key direction
+		local, remote, err := model.ExtractTLSAuthKeys(string(authData), 1)
+		if err != nil {
+			return sessionManager, err
+		}
+
+		sessionManager.packetAuth = &model.PacketAuth{
+			Mode:      model.ControlAuthModeTLSCrypt,
+			LocalKey:  &local,
+			RemoteKey: &remote,
+		}
+
+		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
+		sessionManager.localControlReplayPacketID = 2
 	} else {
 		sessionManager.packetAuth = &model.PacketAuth{
-			Mode: model.ControlAuthModeTLSAuth,
+			Mode: model.ControlAuthModeNone,
 		}
 
 	}
