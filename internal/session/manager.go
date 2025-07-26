@@ -108,9 +108,9 @@ func NewManager(config *config.Config) (*Manager, error) {
 		}
 
 		sessionManager.packetAuth = &model.PacketAuth{
-			Mode:      model.ControlAuthModeTLSAuth,
-			LocalKey:  &local,
-			RemoteKey: &remote,
+			Mode:            model.ControlAuthModeTLSAuth,
+			LocalDigestKey:  &local,
+			RemoteDigestKey: &remote,
 		}
 
 		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
@@ -121,16 +121,9 @@ func NewManager(config *config.Config) (*Manager, error) {
 			return sessionManager, err
 		}
 
-		// TODO: provide ability to pass in key direction
-		local, remote, err := model.ExtractTLSAuthKeys(string(authData), 1)
+		sessionManager.packetAuth, err = model.NewTLSCryptPacketAuth(string(authData))
 		if err != nil {
 			return sessionManager, err
-		}
-
-		sessionManager.packetAuth = &model.PacketAuth{
-			Mode:      model.ControlAuthModeTLSCrypt,
-			LocalKey:  &local,
-			RemoteKey: &remote,
 		}
 
 		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
@@ -190,7 +183,7 @@ func (m *Manager) NewACKForPacketIDs(ids []model.PacketID) (*model.Packet, error
 		Payload:         []byte{},
 	}
 
-	if m.TLSAuthEnabled() {
+	if m.packetAuth.Mode == model.ControlAuthModeTLSAuth || m.packetAuth.Mode == model.ControlAuthModeTLSCrypt {
 		replayId, err := m.localControlReplayPacketIDLocked()
 		if err != nil {
 			return nil, err
@@ -225,7 +218,7 @@ func (m *Manager) NewPacket(opcode model.Opcode, payload []byte) (*model.Packet,
 		packet.RemoteSessionID = m.remoteSessionID.Unwrap()
 	}
 
-	if m.TLSAuthEnabled() && opcode.IsControl() {
+	if m.packetAuth.Mode == model.ControlAuthModeTLSAuth || m.packetAuth.Mode == model.ControlAuthModeTLSCrypt {
 		replayId, err := m.localControlReplayPacketIDLocked()
 		if err != nil {
 			return nil, err
@@ -252,7 +245,7 @@ func (m *Manager) NewHardResetPacket() *model.Packet {
 	copy(packet.LocalSessionID[:], m.localSessionID[:])
 
 	// additional fields required by tls-auth mode
-	if m.TLSAuthEnabled() {
+	if m.packetAuth.Mode == model.ControlAuthModeTLSAuth || m.packetAuth.Mode == model.ControlAuthModeTLSCrypt {
 		packet.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
 		packet.ReplayPacketID = 1 // Always 1 for a reset???
 	}
@@ -398,10 +391,6 @@ func (m *Manager) TunnelInfo() model.TunnelInfo {
 		NetMask: m.tunnelInfo.NetMask,
 		PeerID:  m.tunnelInfo.PeerID,
 	}
-}
-
-func (m *Manager) TLSAuthEnabled() bool {
-	return m.PacketAuth().TLSAuthEnabled()
 }
 
 // Defines how control packets are authenticated (e.g. tls-auth)

@@ -3,15 +3,15 @@ package model
 import (
 	"bytes"
 	"crypto"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	_ "crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"strings"
-
 	"github.com/ooni/minivpn/internal/bytesx"
+	"strings"
 )
 
 // The auth keys provided by the server are 64 bytes, but tls-auth
@@ -38,6 +38,22 @@ func extractKeyData(encoded string) ([]byte, error) {
 	s = strings.TrimSuffix(s, OVPN_STATIC_KEY_END)
 
 	return hex.DecodeString(s)
+}
+
+// Accepts a OpenVPN Static key V1 PEM formatted block and extracts into a PacketAuth struct
+func NewTLSCryptPacketAuth(encoded string) (*PacketAuth, error) {
+	buf, err := extractKeyData(encoded)
+	if err != nil {
+		return nil, err
+	}
+
+	n := len(buf) / 4
+	var localCipherKey, localDigestKey, remoteCipherKey, remoteDigestKey AuthKey
+	copy(remoteCipherKey[:], buf[:n])
+	copy(remoteDigestKey[:], buf[n:2*n])
+	copy(localCipherKey[:], buf[2*n:3*n])
+	copy(localDigestKey[:], buf[3*n:])
+	return &PacketAuth{ControlAuthModeTLSCrypt, &remoteCipherKey, &remoteDigestKey, &localCipherKey, &localDigestKey}, nil
 }
 
 // Accepts a OpenVPN Static key V1 PEM formatted block and extracts the
@@ -125,7 +141,6 @@ func GeneratePacketHMAC(key AuthKey, pack *Packet) SHA1HMACHeader {
 // refactor!
 func GeneratePacketHMACTLSCrypt(key AuthKey, pack *Packet) SHA256HMACHeader {
 	h := hmac.New(crypto.SHA256.New, key[:TLS_CRYPT_KEY_LENGTH])
-	fmt.Printf("key=%x\n", key[:TLS_CRYPT_KEY_LENGTH])
 
 	// header = first 17 bytes (opcode | key_id | session_id | replay_packet_id | timestamp)
 	header := make([]byte, 17)
@@ -134,7 +149,6 @@ func GeneratePacketHMACTLSCrypt(key AuthKey, pack *Packet) SHA256HMACHeader {
 	binary.BigEndian.PutUint32(header[9:13], uint32(pack.ReplayPacketID))
 	binary.BigEndian.PutUint32(header[13:17], uint32(pack.PacketTimestamp))
 
-	fmt.Printf("header=%x\n", header)
 	h.Write(header)
 
 	ctrl := &bytes.Buffer{}
@@ -153,10 +167,36 @@ func GeneratePacketHMACTLSCrypt(key AuthKey, pack *Packet) SHA256HMACHeader {
 		bytesx.WriteUint32(ctrl, uint32(pack.ID))
 		ctrl.Write(pack.Payload)
 	}
-	fmt.Printf("crtl=%x\n", ctrl)
 	h.Write(ctrl.Bytes())
 
 	sig := h.Sum(nil)
-	fmt.Printf("hmac=%x\n", sig)
 	return SHA256HMACHeader(sig)
+}
+
+func EncryptControlMessage(hmac SHA256HMACHeader, key AuthKey, msg []byte) ([]byte, error) {
+	return doControlAESXOR(hmac, key, msg)
+}
+
+func DecryptControlMessage(hmac SHA256HMACHeader, key AuthKey, ct []byte) ([]byte, error) {
+	return doControlAESXOR(hmac, key, ct)
+}
+
+// Since performing an XOR with the key stream is a symmetric function, the
+// exact same operation can be performed for both encryption and decryption
+func doControlAESXOR(hmac SHA256HMACHeader, key AuthKey, in []byte) ([]byte, error) {
+	out := make([]byte, len(in))
+
+	// OpenVPN uses first 16 bytes of HMAC as IV
+	iv := hmac[:16]
+
+	// 3. AES-256-CTR encryption
+	block, err := aes.NewCipher(key[:32]) // only use first 32 bytes
+	if err != nil {
+		return out, err
+	}
+	ctr := cipher.NewCTR(block, iv)
+
+	ctr.XORKeyStream(out, in)
+
+	return out, nil
 }
