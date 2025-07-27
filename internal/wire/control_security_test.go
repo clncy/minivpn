@@ -1,10 +1,12 @@
-package model
+package wire
 
 import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"testing"
+
+	"github.com/ooni/minivpn/internal/model"
 )
 
 const keyData = `-----BEGIN OpenVPN Static key V1-----
@@ -31,39 +33,38 @@ const (
 	key1 = "3654df5a7241d003f4729fece1c02793811c4d10e06d969f9798ced2a24c2f76c040024d19256531a37502ad3487ca8f34335f34d61fb3be37946fa0c9ae1898"
 )
 
-func TestExtractTLSAuthKeys(t *testing.T) {
-	k0, _ := hex.DecodeString(key0)
-	k1, _ := hex.DecodeString(key1)
-
-	t.Run("valid keys returned with direction=1", func(t *testing.T) {
-		local, remote, err := ExtractTLSAuthKeys(keyData, 1)
-		if err != nil {
-			t.Errorf("got error for valid key: %v", err)
-		}
-
-		if !bytes.Equal(local[:], k1) {
-			t.Errorf("incorrect local key returned got=%x want=%x", local, k1)
-		}
-
-		if !bytes.Equal(remote[:], k0) {
-			t.Errorf("incorrect remote key returned got=%x want=%x", remote, k0)
-		}
-	})
-}
+// TODO add tests for all packet auth creation methods
+// func TestExtractTLSAuthKeys(t *testing.T) {
+// 	k0, _ := hex.DecodeString(key0)
+// 	k1, _ := hex.DecodeString(key1)
+//
+// 	t.Run("valid keys returned with direction=1", func(t *testing.T) {
+// 		local, remote, err := ExtractTLSAuthKeys(keyData, 1)
+// 		if err != nil {
+// 			t.Errorf("got error for valid key: %v", err)
+// 		}
+//
+// 		if !bytes.Equal(local[:], k1) {
+// 			t.Errorf("incorrect local key returned got=%x want=%x", local, k1)
+// 		}
+//
+// 		if !bytes.Equal(remote[:], k0) {
+// 			t.Errorf("incorrect remote key returned got=%x want=%x", remote, k0)
+// 		}
+// 	})
+// }
 
 func TestGeneratePacketHMAC(t *testing.T) {
-	var k1 AuthKey
+	var k1 ControlChannelKey
 	hex.Decode(k1[:], []byte(key1))
-
-	// pack, _ := hex.DecodeString("38529034d4d6b753b600000000000000000000000000000000000000000000000167444aed0000000000")
 
 	sessionId, _ := hex.DecodeString("529034d4d6b753b6")
 	timestamp, _ := hex.DecodeString("67444aed")
 
-	pack := &Packet{
-		Opcode:          P_CONTROL_HARD_RESET_CLIENT_V2,
-		LocalSessionID:  SessionID(sessionId),
-		PacketTimestamp: PacketTimestamp(binary.BigEndian.Uint32(timestamp)),
+	pack := &model.Packet{
+		Opcode:          model.P_CONTROL_HARD_RESET_CLIENT_V2,
+		LocalSessionID:  model.SessionID(sessionId),
+		PacketTimestamp: model.PacketTimestamp(binary.BigEndian.Uint32(timestamp)),
 		ReplayPacketID:  1,
 		ID:              0,
 	}

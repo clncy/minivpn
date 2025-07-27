@@ -13,6 +13,7 @@ import (
 	"github.com/ooni/minivpn/internal/model"
 	"github.com/ooni/minivpn/internal/optional"
 	"github.com/ooni/minivpn/internal/runtimex"
+	"github.com/ooni/minivpn/internal/wire"
 	"github.com/ooni/minivpn/pkg/config"
 )
 
@@ -40,7 +41,7 @@ type Manager struct {
 	tracer               model.HandshakeTracer
 
 	// Additional state required to support tls-auth
-	packetAuth                 *model.PacketAuth
+	controlChannelSecurity     *wire.ControlChannelSecurity
 	localControlReplayPacketID model.PacketID
 
 	// Ready is a channel where we signal that we can start accepting data, because we've
@@ -102,15 +103,9 @@ func NewManager(config *config.Config) (*Manager, error) {
 		}
 
 		// TODO: provide ability to pass in key direction
-		local, remote, err := model.ExtractTLSAuthKeys(string(authData), 1)
+		sessionManager.controlChannelSecurity, err = wire.NewControlChannelSecurityTLSAuth(authData, 1)
 		if err != nil {
 			return sessionManager, err
-		}
-
-		sessionManager.packetAuth = &model.PacketAuth{
-			Mode:            model.ControlAuthModeTLSAuth,
-			LocalDigestKey:  &local,
-			RemoteDigestKey: &remote,
 		}
 
 		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
@@ -121,7 +116,7 @@ func NewManager(config *config.Config) (*Manager, error) {
 			return sessionManager, err
 		}
 
-		sessionManager.packetAuth, err = model.NewTLSCryptPacketAuth(string(authData))
+		sessionManager.controlChannelSecurity, err = wire.NewControlChannelSecurityTLSCrypt(authData)
 		if err != nil {
 			return sessionManager, err
 		}
@@ -134,7 +129,7 @@ func NewManager(config *config.Config) (*Manager, error) {
 			return sessionManager, err
 		}
 
-		sessionManager.packetAuth, err = model.NewTLSCryptV2PacketAuth(string(authData))
+		sessionManager.controlChannelSecurity, err = wire.NewControlChannelSecurityTLSCryptV2(authData)
 		if err != nil {
 			return sessionManager, err
 		}
@@ -142,8 +137,8 @@ func NewManager(config *config.Config) (*Manager, error) {
 		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
 		sessionManager.localControlReplayPacketID = 2
 	} else {
-		sessionManager.packetAuth = &model.PacketAuth{
-			Mode: model.ControlAuthModeNone,
+		sessionManager.controlChannelSecurity = &wire.ControlChannelSecurity{
+			Mode: wire.ControlSecurityModeNone,
 		}
 
 	}
@@ -196,7 +191,7 @@ func (m *Manager) NewACKForPacketIDs(ids []model.PacketID) (*model.Packet, error
 		Payload:         []byte{},
 	}
 
-	if m.packetAuth.Mode != model.ControlAuthModeNone {
+	if m.controlChannelSecurity.Mode != wire.ControlSecurityModeNone {
 		replayId, err := m.localControlReplayPacketIDLocked()
 		if err != nil {
 			return nil, err
@@ -231,7 +226,7 @@ func (m *Manager) NewPacket(opcode model.Opcode, payload []byte) (*model.Packet,
 		packet.RemoteSessionID = m.remoteSessionID.Unwrap()
 	}
 
-	if m.packetAuth.Mode != model.ControlAuthModeNone {
+	if m.controlChannelSecurity.Mode != wire.ControlSecurityModeNone {
 		replayId, err := m.localControlReplayPacketIDLocked()
 		if err != nil {
 			return nil, err
@@ -248,7 +243,7 @@ func (m *Manager) NewPacket(opcode model.Opcode, payload []byte) (*model.Packet,
 // but we send hard resets at the muxer.
 func (m *Manager) NewHardResetPacket() *model.Packet {
 	var opcode model.Opcode
-	if m.packetAuth.Mode == model.ControlAuthModeTLSCryptV2 {
+	if m.controlChannelSecurity.Mode == wire.ControlSecurityModeTLSCryptV2 {
 		opcode = model.P_CONTROL_HARD_RESET_CLIENT_V3
 	} else {
 		opcode = model.P_CONTROL_HARD_RESET_CLIENT_V2
@@ -264,7 +259,7 @@ func (m *Manager) NewHardResetPacket() *model.Packet {
 	copy(packet.LocalSessionID[:], m.localSessionID[:])
 
 	// additional fields required by tls-auth mode
-	if m.packetAuth.Mode != model.ControlAuthModeNone {
+	if m.controlChannelSecurity.Mode != wire.ControlSecurityModeNone {
 		packet.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
 		packet.ReplayPacketID = 1 // Always 1 for a reset???
 	}
@@ -413,8 +408,8 @@ func (m *Manager) TunnelInfo() model.TunnelInfo {
 }
 
 // Defines how control packets are authenticated (e.g. tls-auth)
-func (m *Manager) PacketAuth() *model.PacketAuth {
-	return m.packetAuth
+func (m *Manager) PacketAuth() *wire.ControlChannelSecurity {
+	return m.controlChannelSecurity
 }
 
 // Very similar to the localControlPacketID, but includes ACKs as well
