@@ -30,6 +30,8 @@ const (
 	P_CONTROL_HARD_RESET_CLIENT_V2                    // 7
 	P_CONTROL_HARD_RESET_SERVER_V2                    // 8
 	P_DATA_V2                                         // 9
+	P_CONTROL_HARD_RESET_CLIENT_V3                    // 10
+	P_CONTROL_WKC_V1                                  // 11
 )
 
 // NewOpcodeFromString returns an opcode from a string representation, and an error if it cannot parse the opcode
@@ -54,6 +56,11 @@ func NewOpcodeFromString(s string) (Opcode, error) {
 		return P_CONTROL_HARD_RESET_SERVER_V2, nil
 	case "DATA_V2":
 		return P_DATA_V2, nil
+	case "P_CONTROL_HARD_RESET_CLIENT_V3":
+		return P_CONTROL_HARD_RESET_CLIENT_V3, nil
+	case "P_CONTROL_WKC_V1":
+		return P_CONTROL_WKC_V1, nil
+		// 11
 	default:
 		return 0, errors.New("unknown opcode")
 	}
@@ -89,6 +96,12 @@ func (op Opcode) String() string {
 	case P_DATA_V2:
 		return "P_DATA_V2"
 
+	case P_CONTROL_HARD_RESET_CLIENT_V3:
+		return "P_CONTROL_HARD_RESET_CLIENT_V3"
+
+	case P_CONTROL_WKC_V1:
+		return "P_CONTROL_WKC_V1"
+
 	default:
 		return "P_UNKNOWN"
 	}
@@ -102,6 +115,8 @@ func (op Opcode) IsControl() bool {
 		P_CONTROL_SOFT_RESET_V1,
 		P_CONTROL_V1,
 		P_CONTROL_HARD_RESET_CLIENT_V2,
+		P_CONTROL_HARD_RESET_CLIENT_V3,
+		P_CONTROL_WKC_V1,
 		P_CONTROL_HARD_RESET_SERVER_V2:
 		return true
 	default:
@@ -186,11 +201,9 @@ const (
 	ControlAuthModeNone ControlAuthMode = iota
 	ControlAuthModeTLSAuth
 	ControlAuthModeTLSCrypt
+	ControlAuthModeTLSCryptV2
 )
 
-// Provides support for tls-auth mode where packets have a different structure that
-// includes an HMAC of the packet contents (for control packets only)
-// TODO: can be extended to support additional modes (tls-crypt/tls-cryptv2)
 type PacketAuth struct {
 	// Determines the type of control channel security in use
 	Mode ControlAuthMode
@@ -202,10 +215,9 @@ type PacketAuth struct {
 	// Used by SerializePacket() to calculate HMAC digest + encrypt control channel
 	LocalCipherKey *AuthKey
 	LocalDigestKey *AuthKey
-}
 
-func (a *PacketAuth) TLSAuthEnabled() bool {
-	return a.Mode == ControlAuthModeTLSAuth
+	// Used exclusively for tls-cryptv2 (WKc)
+	WrappedClientKey []byte
 }
 
 // ErrPacketTooShort indicates that a packet is too short.
@@ -318,7 +330,7 @@ func SerializePacket(p *Packet, packetAuth *PacketAuth) ([]byte, error) {
 			buf.Write(p.Payload)
 
 		// Note HMAC header is in a different position than tls-auth
-		case ControlAuthModeTLSCrypt:
+		case ControlAuthModeTLSCrypt, ControlAuthModeTLSCryptV2:
 			bytesx.WriteUint32(buf, uint32(p.ReplayPacketID))
 			bytesx.WriteUint32(buf, uint32(p.PacketTimestamp))
 
@@ -338,21 +350,34 @@ func SerializePacket(p *Packet, packetAuth *PacketAuth) ([]byte, error) {
 			}
 			if p.Opcode != P_ACK_V1 {
 				// Message-level pet id
-				fmt.Printf("outgoing pid=%d\n", p.ID)
 				bytesx.WriteUint32(ctrl, uint32(p.ID))
 				ctrl.Write(p.Payload)
 			}
 
-			fmt.Printf("outgoing ctrl crypt portion=%x\n", ctrl)
+			fmt.Printf("outgoing pid=%d\n", p.ID)
+			fmt.Printf("outgoing replay_pid=%d\n", p.ReplayPacketID)
 
 			enc, err := EncryptControlMessage(hmacHeader, *packetAuth.LocalCipherKey, ctrl.Bytes())
 			if err != nil {
 				return nil, err
 			}
-
 			buf.Write(enc)
+
 		}
+
+		// tls-cryptv2 requires an additional "wrapped client key" to be appended to reset packets
+		// which includes the client key (Kc) encrypted with a server key (not exposed to client) so
+		// that the server can statelessly validate the keys used by the client
+		if packetAuth.Mode == ControlAuthModeTLSCryptV2 && p.Opcode == P_CONTROL_HARD_RESET_CLIENT_V3 {
+			buf.Write(packetAuth.WrappedClientKey) // WKc
+
+			// n := len(packetAuth.WrappedClientKey)
+			// bytesx.WriteUint16(buf, uint32(n)) // len(WKc)
+		}
+
+		fmt.Printf("CTRL: %s, replay_id=%d, reliable_id=%d\n", p.Opcode.String(), p.ReplayPacketID, p.ID)
 	}
+
 	return buf.Bytes(), nil
 }
 
@@ -485,7 +510,7 @@ func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte, packetAu
 
 		// payload
 		p.Payload = buf.Bytes()
-	case ControlAuthModeTLSCrypt:
+	case ControlAuthModeTLSCrypt, ControlAuthModeTLSCryptV2:
 		// replay packet id
 		replayId, err := bytesx.ReadUint32(buf)
 		if err != nil {
@@ -557,7 +582,6 @@ func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte, packetAu
 			return p, fmt.Errorf("%w: %s", ErrParsePacket, err)
 		}
 
-		fmt.Printf("got=%x want=%x\n", p.SHA256HMAC, wantDigest)
 		if p.SHA256HMAC != wantDigest {
 			return p, fmt.Errorf("%w: packet digest (hmac) is not valid", ErrParsePacket)
 		}

@@ -7,11 +7,13 @@ import (
 	"crypto/cipher"
 	"crypto/hmac"
 	_ "crypto/sha1"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"github.com/ooni/minivpn/internal/bytesx"
 	"strings"
+
+	"github.com/ooni/minivpn/internal/bytesx"
 )
 
 // The auth keys provided by the server are 64 bytes, but tls-auth
@@ -24,8 +26,10 @@ const TLS_CRYPT_KEY_LENGTH = 32
 type AuthKey [64]byte
 
 const (
-	OVPN_STATIC_KEY_BEGIN = "-----BEGINOpenVPNStatickeyV1-----"
-	OVPN_STATIC_KEY_END   = "-----ENDOpenVPNStatickeyV1-----"
+	OVPN_STATIC_KEY_BEGIN       = "-----BEGINOpenVPNStatickeyV1-----"
+	OVPN_STATIC_KEY_END         = "-----ENDOpenVPNStatickeyV1-----"
+	OVPN_TLS_CRYPT_V2_KEY_BEGIN = "-----BEGINOpenVPNtls-crypt-v2clientkey-----"
+	OVPN_TLS_CRYPT_V2_KEY_END   = "-----ENDOpenVPNtls-crypt-v2clientkey-----"
 )
 
 var errParsingTLSAuth = errors.New("error parsing provided tls-auth key")
@@ -53,7 +57,44 @@ func NewTLSCryptPacketAuth(encoded string) (*PacketAuth, error) {
 	copy(remoteDigestKey[:], buf[n:2*n])
 	copy(localCipherKey[:], buf[2*n:3*n])
 	copy(localDigestKey[:], buf[3*n:])
-	return &PacketAuth{ControlAuthModeTLSCrypt, &remoteCipherKey, &remoteDigestKey, &localCipherKey, &localDigestKey}, nil
+	return &PacketAuth{Mode: ControlAuthModeTLSCrypt, RemoteCipherKey: &remoteCipherKey, RemoteDigestKey: &remoteDigestKey, LocalCipherKey: &localCipherKey, LocalDigestKey: &localDigestKey}, nil
+}
+
+func NewTLSCryptV2PacketAuth(encoded string) (*PacketAuth, error) {
+	b, err := extractCryptV2KeyData(encoded)
+	if err != nil {
+		return nil, err
+	}
+
+	// The tls-crypt-v2 block first contains 4 * AUTH_KEY_TOTAL_LENGTH keys, then a variable length WrappedClientKey
+	keyData := b[:4*AUTH_KEY_TOTAL_LENGTH]
+	WKc := b[4*AUTH_KEY_TOTAL_LENGTH:]
+
+	n := len(keyData) / 4
+	var localCipherKey, localDigestKey, remoteCipherKey, remoteDigestKey AuthKey
+	copy(remoteCipherKey[:], keyData[:n])
+	copy(remoteDigestKey[:], keyData[n:2*n])
+	copy(localCipherKey[:], keyData[2*n:3*n])
+	copy(localDigestKey[:], keyData[3*n:])
+
+	return &PacketAuth{
+		Mode:             ControlAuthModeTLSCryptV2,
+		RemoteCipherKey:  &remoteCipherKey,
+		RemoteDigestKey:  &remoteDigestKey,
+		LocalCipherKey:   &localCipherKey,
+		LocalDigestKey:   &localDigestKey,
+		WrappedClientKey: WKc,
+	}, nil
+}
+
+func extractCryptV2KeyData(encoded string) ([]byte, error) {
+	s := strings.ReplaceAll(encoded, "\n", "")
+	s = strings.ReplaceAll(s, " ", "")
+
+	s = strings.TrimPrefix(s, OVPN_TLS_CRYPT_V2_KEY_BEGIN)
+	s = strings.TrimSuffix(s, OVPN_TLS_CRYPT_V2_KEY_END)
+
+	return base64.StdEncoding.DecodeString(s)
 }
 
 // Accepts a OpenVPN Static key V1 PEM formatted block and extracts the

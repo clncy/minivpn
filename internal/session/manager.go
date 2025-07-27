@@ -128,6 +128,19 @@ func NewManager(config *config.Config) (*Manager, error) {
 
 		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
 		sessionManager.localControlReplayPacketID = 2
+	} else if len(config.OpenVPNOptions().TLSCryptV2Path) != 0 {
+		authData, err := os.ReadFile(config.OpenVPNOptions().TLSCryptV2Path)
+		if err != nil {
+			return sessionManager, err
+		}
+
+		sessionManager.packetAuth, err = model.NewTLSCryptV2PacketAuth(string(authData))
+		if err != nil {
+			return sessionManager, err
+		}
+
+		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
+		sessionManager.localControlReplayPacketID = 2
 	} else {
 		sessionManager.packetAuth = &model.PacketAuth{
 			Mode: model.ControlAuthModeNone,
@@ -183,7 +196,7 @@ func (m *Manager) NewACKForPacketIDs(ids []model.PacketID) (*model.Packet, error
 		Payload:         []byte{},
 	}
 
-	if m.packetAuth.Mode == model.ControlAuthModeTLSAuth || m.packetAuth.Mode == model.ControlAuthModeTLSCrypt {
+	if m.packetAuth.Mode != model.ControlAuthModeNone {
 		replayId, err := m.localControlReplayPacketIDLocked()
 		if err != nil {
 			return nil, err
@@ -218,7 +231,7 @@ func (m *Manager) NewPacket(opcode model.Opcode, payload []byte) (*model.Packet,
 		packet.RemoteSessionID = m.remoteSessionID.Unwrap()
 	}
 
-	if m.packetAuth.Mode == model.ControlAuthModeTLSAuth || m.packetAuth.Mode == model.ControlAuthModeTLSCrypt {
+	if m.packetAuth.Mode != model.ControlAuthModeNone {
 		replayId, err := m.localControlReplayPacketIDLocked()
 		if err != nil {
 			return nil, err
@@ -234,8 +247,14 @@ func (m *Manager) NewPacket(opcode model.Opcode, payload []byte) (*model.Packet,
 // its packet ID. Normally retransmission is handled at the reliabletransport layer,
 // but we send hard resets at the muxer.
 func (m *Manager) NewHardResetPacket() *model.Packet {
+	var opcode model.Opcode
+	if m.packetAuth.Mode == model.ControlAuthModeTLSCryptV2 {
+		opcode = model.P_CONTROL_HARD_RESET_CLIENT_V3
+	} else {
+		opcode = model.P_CONTROL_HARD_RESET_CLIENT_V2
+	}
 	packet := model.NewPacket(
-		model.P_CONTROL_HARD_RESET_CLIENT_V2,
+		opcode,
 		m.keyID,
 		[]byte{},
 	)
@@ -245,7 +264,7 @@ func (m *Manager) NewHardResetPacket() *model.Packet {
 	copy(packet.LocalSessionID[:], m.localSessionID[:])
 
 	// additional fields required by tls-auth mode
-	if m.packetAuth.Mode == model.ControlAuthModeTLSAuth || m.packetAuth.Mode == model.ControlAuthModeTLSCrypt {
+	if m.packetAuth.Mode != model.ControlAuthModeNone {
 		packet.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
 		packet.ReplayPacketID = 1 // Always 1 for a reset???
 	}
