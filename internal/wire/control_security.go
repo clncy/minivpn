@@ -1,20 +1,15 @@
 package wire
 
 import (
-	"bytes"
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	_ "crypto/sha1"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"strings"
-
-	"github.com/ooni/minivpn/internal/bytesx"
-	"github.com/ooni/minivpn/internal/model"
 )
 
 // The auth keys provided by the server are 64 bytes, but tls-auth
@@ -168,76 +163,24 @@ func extractCryptV2KeyData(encoded []byte) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
 }
 
-func GeneratePacketHMAC(key ControlChannelKey, pack *model.Packet) SHA1HMACDigest {
+func GenerateTLSAuthDigest(key *ControlChannelKey, header []byte, replay []byte, message []byte) SHA1HMACDigest {
 	h := hmac.New(crypto.SHA1.New, key[:TLS_AUTH_KEY_LENGTH])
 
-	// a = (replay_packet_id | timestamp)
-	a := make([]byte, 8)
-	binary.BigEndian.PutUint32(a[:4], uint32(pack.ReplayPacketID))
-	binary.BigEndian.PutUint32(a[4:], uint32(pack.PacketTimestamp))
-
-	h.Write(a[:])
-
-	// b = first 9 bytes (opcode | key_id | session_id)
-	b := make([]byte, 9)
-	b[0] = byte(pack.Opcode << 3)
-	copy(b[1:], pack.LocalSessionID[:])
-	h.Write(b)
-
-	// The remainder of the packet
-	// TODO: this section heavily replicates model.packet.Bytes, would be nice to refactor
-	// so we're not doubling up
-	c := &bytes.Buffer{}
-	// we write a byte with the number of acks, and then serialize each ack.
-	nAcks := len(pack.ACKs)
-	c.WriteByte(byte(nAcks))
-	for i := 0; i < nAcks; i++ {
-		bytesx.WriteUint32(c, uint32(pack.ACKs[i]))
-	}
-	// remote session id
-	if len(pack.ACKs) > 0 {
-		c.Write(pack.RemoteSessionID[:])
-	}
-	if pack.Opcode != model.P_ACK_V1 {
-		bytesx.WriteUint32(c, uint32(pack.ID))
-		c.Write(pack.Payload)
-	}
-	h.Write(c.Bytes())
+	h.Write(replay)
+	h.Write(header)
+	h.Write(message)
 
 	sig := h.Sum(nil)
 	return SHA1HMACDigest(sig)
 }
 
-// refactor!
-func GeneratePacketHMACTLSCrypt(key ControlChannelKey, pack *model.Packet) SHA256HMACDigest {
+func GenerateTLSCryptDigest(key *ControlChannelKey, header []byte, replay []byte, message []byte) SHA256HMACDigest {
 	h := hmac.New(crypto.SHA256.New, key[:TLS_CRYPT_KEY_LENGTH])
 
-	// header = first 17 bytes (opcode | key_id | session_id | replay_packet_id | timestamp)
-	header := make([]byte, 17)
-	header[0] = byte(pack.Opcode << 3)
-	copy(header[1:9], pack.LocalSessionID[:])
-	binary.BigEndian.PutUint32(header[9:13], uint32(pack.ReplayPacketID))
-	binary.BigEndian.PutUint32(header[13:17], uint32(pack.PacketTimestamp))
-
+	// N.B. order of packet chunks is different to tls-auth
 	h.Write(header)
-
-	ctrl := &bytes.Buffer{}
-	// we write a byte with the number of acks, and then serialize each ack.
-	nAcks := len(pack.ACKs)
-	ctrl.WriteByte(byte(nAcks))
-	for i := 0; i < nAcks; i++ {
-		bytesx.WriteUint32(ctrl, uint32(pack.ACKs[i]))
-	}
-	// remote session id
-	if len(pack.ACKs) > 0 {
-		ctrl.Write(pack.RemoteSessionID[:])
-	}
-	if pack.Opcode != model.P_ACK_V1 {
-		// Message-level packet id
-		bytesx.WriteUint32(ctrl, uint32(pack.ID))
-		ctrl.Write(pack.Payload)
-	}
-	h.Write(ctrl.Bytes())
+	h.Write(replay)
+	h.Write(message)
 
 	sig := h.Sum(nil)
 	return SHA256HMACDigest(sig)

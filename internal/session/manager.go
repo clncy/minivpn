@@ -197,7 +197,7 @@ func (m *Manager) NewACKForPacketIDs(ids []model.PacketID) (*model.Packet, error
 			return nil, err
 		}
 		p.ReplayPacketID = replayId
-		p.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
+		p.Timestamp = model.PacketTimestamp(time.Now().Unix())
 	}
 	return p, nil
 }
@@ -232,7 +232,7 @@ func (m *Manager) NewPacket(opcode model.Opcode, payload []byte) (*model.Packet,
 			return nil, err
 		}
 		packet.ReplayPacketID = replayId
-		packet.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
+		packet.Timestamp = model.PacketTimestamp(time.Now().Unix())
 	}
 	return packet, nil
 }
@@ -260,7 +260,7 @@ func (m *Manager) NewHardResetPacket() *model.Packet {
 
 	// additional fields required by tls-auth mode
 	if m.controlChannelSecurity.Mode != wire.ControlSecurityModeNone {
-		packet.PacketTimestamp = model.PacketTimestamp(time.Now().Unix())
+		packet.Timestamp = model.PacketTimestamp(time.Now().Unix())
 		packet.ReplayPacketID = 1 // Always 1 for a reset???
 	}
 	return packet

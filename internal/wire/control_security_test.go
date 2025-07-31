@@ -62,16 +62,19 @@ func TestGeneratePacketHMAC(t *testing.T) {
 	timestamp, _ := hex.DecodeString("67444aed")
 
 	pack := &model.Packet{
-		Opcode:          model.P_CONTROL_HARD_RESET_CLIENT_V2,
-		LocalSessionID:  model.SessionID(sessionId),
-		PacketTimestamp: model.PacketTimestamp(binary.BigEndian.Uint32(timestamp)),
-		ReplayPacketID:  1,
-		ID:              0,
+		Opcode:         model.P_CONTROL_HARD_RESET_CLIENT_V2,
+		LocalSessionID: model.SessionID(sessionId),
+		Timestamp:      model.PacketTimestamp(binary.BigEndian.Uint32(timestamp)),
+		ReplayPacketID: 1,
+		ID:             0,
 	}
 	want, _ := hex.DecodeString("9f4a9edd3182c8d4a0c07702a8f7e2e2aefba299")
 
 	t.Run("valid hmac signature calculated from packet", func(t *testing.T) {
-		hmac := GeneratePacketHMAC(k1, pack)
+		replay := replayProtectionBytes(pack)
+		header := headerBytes(pack)
+		msg, _ := controlMessageBytes(pack)
+		hmac := GenerateTLSAuthDigest(&k1, header, replay, msg)
 
 		if !bytes.Equal(hmac[:], want) {
 			t.Errorf("incorrect hmac generated got=%x want=%x", hmac[:], want)

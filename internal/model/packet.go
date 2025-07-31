@@ -163,7 +163,7 @@ type Packet struct {
 	ReplayPacketID PacketID
 
 	// Optional timestamp field used for tls-auth (seconds since the epoch)
-	PacketTimestamp PacketTimestamp
+	Timestamp PacketTimestamp
 
 	// Acks contains the remote packets we're ACKing.
 	ACKs []PacketID

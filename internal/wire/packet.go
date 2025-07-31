@@ -32,66 +32,42 @@ func MarshalPacket(p *model.Packet, packetAuth *ControlChannelSecurity) ([]byte,
 		// so we serialize just the encrypted payload
 
 	default:
-		buf.WriteByte((byte(p.Opcode) << 3) | (p.KeyID & 0x07))
-		buf.Write(p.LocalSessionID[:])
+		// Chunks that of the packet which will be composed in different ways
+		// based on the type of control channel security used
+		header := headerBytes(p)
+		replay := replayProtectionBytes(p)
+		ctrl, err := controlMessageBytes(p)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s\n", ErrMarshalPacket, err)
+		}
 
 		switch packetAuth.Mode {
 		case ControlSecurityModeNone:
-			err := writeACKDataToBuffer(buf, p)
-			if err != nil {
-				return nil, err
-			}
-			if p.Opcode != model.P_ACK_V1 {
-				bytesx.WriteUint32(buf, uint32(p.ID))
-			}
-			//  payload
-			buf.Write(p.Payload)
+			buf.Write(header)
+			buf.Write(ctrl)
 
 		case ControlSecurityModeTLSAuth:
-			hmacDigest := GeneratePacketHMAC(*packetAuth.LocalDigestKey, p)
-			buf.Write(hmacDigest[:])
-			bytesx.WriteUint32(buf, uint32(p.ReplayPacketID))
-			bytesx.WriteUint32(buf, uint32(p.PacketTimestamp))
+			digest := GenerateTLSAuthDigest(packetAuth.LocalDigestKey, header, replay, ctrl)
 
-			err := writeACKDataToBuffer(buf, p)
-			if err != nil {
-				return nil, err
-			}
-			if p.Opcode != model.P_ACK_V1 {
-				bytesx.WriteUint32(buf, uint32(p.ID))
-			}
-			//  payload
-			buf.Write(p.Payload)
+			buf.Write(header)
+			buf.Write(digest[:])
+			buf.Write(replay)
+			buf.Write(ctrl)
 
 		// Note HMAC header is in a different position than tls-auth
 		case ControlSecurityModeTLSCrypt, ControlSecurityModeTLSCryptV2:
-			bytesx.WriteUint32(buf, uint32(p.ReplayPacketID))
-			bytesx.WriteUint32(buf, uint32(p.PacketTimestamp))
+			digest := GenerateTLSCryptDigest(packetAuth.LocalDigestKey, header, replay, ctrl)
 
-			hmacDigest := GeneratePacketHMACTLSCrypt(*packetAuth.LocalDigestKey, p)
-			buf.Write(hmacDigest[:])
-
-			ctrl := &bytes.Buffer{}
-			// we write a byte with the number of acks, and then serialize each ack.
-			nAcks := len(p.ACKs)
-			ctrl.WriteByte(byte(nAcks))
-			for i := 0; i < nAcks; i++ {
-				bytesx.WriteUint32(ctrl, uint32(p.ACKs[i]))
-			}
-			// remote session id
-			if len(p.ACKs) > 0 {
-				ctrl.Write(p.RemoteSessionID[:])
-			}
-			if p.Opcode != model.P_ACK_V1 {
-				// Message-level pet id
-				bytesx.WriteUint32(ctrl, uint32(p.ID))
-				ctrl.Write(p.Payload)
-			}
-
-			enc, err := EncryptControlMessage(hmacDigest, *packetAuth.LocalCipherKey, ctrl.Bytes())
+			// The packet digest (HMAC) is used as the IV for the AES-256-CTR encryption
+			// of the control message
+			enc, err := EncryptControlMessage(digest, *packetAuth.LocalCipherKey, ctrl)
 			if err != nil {
 				return nil, err
 			}
+
+			buf.Write(header)
+			buf.Write(replay)
+			buf.Write(digest[:])
 			buf.Write(enc)
 
 		}
@@ -101,241 +77,10 @@ func MarshalPacket(p *model.Packet, packetAuth *ControlChannelSecurity) ([]byte,
 		// that the server can statelessly validate the keys used by the client
 		if packetAuth.Mode == ControlSecurityModeTLSCryptV2 && p.Opcode == model.P_CONTROL_HARD_RESET_CLIENT_V3 {
 			buf.Write(packetAuth.WrappedClientKey) // WKc
-
-			// n := len(packetAuth.WrappedClientKey)
-			// bytesx.WriteUint16(buf, uint32(n)) // len(WKc)
 		}
 	}
 
 	return buf.Bytes(), nil
-}
-
-func writeACKDataToBuffer(buf *bytes.Buffer, p *model.Packet) error {
-	// we write a byte with the number of acks, and then serialize each ack.
-	nAcks := len(p.ACKs)
-	if nAcks > math.MaxUint8 {
-		return fmt.Errorf("%w: too many ACKs", ErrMarshalPacket)
-	}
-	buf.WriteByte(byte(nAcks))
-	for i := 0; i < nAcks; i++ {
-		bytesx.WriteUint32(buf, uint32(p.ACKs[i]))
-	}
-	// remote session id
-	if len(p.ACKs) > 0 {
-		buf.Write(p.RemoteSessionID[:])
-	}
-	return nil
-}
-
-// parseControlOrACKPacket parses the contents of a control or ACK packet.
-func parseControlOrACKPacket(opcode model.Opcode, keyID byte, payload []byte, packetAuth *ControlChannelSecurity) (*model.Packet, error) {
-	// make sure we have payload to parse and we're parsing control or ACK
-	if len(payload) <= 0 {
-		return nil, ErrEmptyPayload
-	}
-	if !opcode.IsControl() && opcode != model.P_ACK_V1 {
-		return nil, fmt.Errorf("%w: %s", ErrParsePacket, "expected control/ack packet")
-	}
-
-	// create a buffer for parsing the packet
-	buf := bytes.NewBuffer(payload)
-
-	p := model.NewPacket(opcode, keyID, payload)
-
-	// local session id
-	if _, err := io.ReadFull(buf, p.LocalSessionID[:]); err != nil {
-		return p, fmt.Errorf("%w: bad sessionID: %s", ErrParsePacket, err)
-	}
-
-	switch packetAuth.Mode {
-	case ControlSecurityModeNone:
-		// ack array length
-		ackArrayLenByte, err := buf.ReadByte()
-		if err != nil {
-			return p, fmt.Errorf("%w: bad ack: %s", ErrParsePacket, err)
-		}
-		ackArrayLen := int(ackArrayLenByte)
-
-		// ack array
-		p.ACKs = make([]model.PacketID, ackArrayLen)
-		for i := 0; i < ackArrayLen; i++ {
-			val, err := bytesx.ReadUint32(buf)
-			if err != nil {
-				return p, fmt.Errorf("%w: cannot parse ack id: %s", ErrParsePacket, err)
-			}
-			p.ACKs[i] = model.PacketID(val)
-		}
-
-		// remote session id
-		if ackArrayLen > 0 {
-			if _, err = io.ReadFull(buf, p.RemoteSessionID[:]); err != nil {
-				return p, fmt.Errorf("%w: bad remote sessionID: %s", ErrParsePacket, err)
-			}
-		}
-
-		// packet id
-		if p.Opcode != model.P_ACK_V1 {
-			val, err := bytesx.ReadUint32(buf)
-			if err != nil {
-				return p, fmt.Errorf("%w: bad packetID: %s", ErrParsePacket, err)
-			}
-			p.ID = model.PacketID(val)
-		}
-
-		// payload
-		p.Payload = buf.Bytes()
-	case ControlSecurityModeTLSAuth:
-		var hmacGot SHA1HMACDigest
-		if _, err := io.ReadFull(buf, hmacGot[:]); err != nil {
-			return p, fmt.Errorf("%w: bad HMAC (tls-auth): %s", ErrParsePacket, err)
-		}
-
-		// replay packet id
-		replayId, err := bytesx.ReadUint32(buf)
-		if err != nil {
-			return p, fmt.Errorf("%w: bad replay packet id (tls-auth): %s", ErrParsePacket, err)
-		}
-		p.ReplayPacketID = model.PacketID(replayId)
-
-		// timestamp
-		timestamp, err := bytesx.ReadUint32(buf)
-		if err != nil {
-			return p, fmt.Errorf("%w: bad packet timestamp (tls-auth): %s", ErrParsePacket, err)
-		}
-		p.PacketTimestamp = model.PacketTimestamp(timestamp)
-		// ack array length
-		ackArrayLenByte, err := buf.ReadByte()
-		if err != nil {
-			return p, fmt.Errorf("%w: bad ack: %s", ErrParsePacket, err)
-		}
-		ackArrayLen := int(ackArrayLenByte)
-
-		// ack array
-		p.ACKs = make([]model.PacketID, ackArrayLen)
-		for i := 0; i < ackArrayLen; i++ {
-			val, err := bytesx.ReadUint32(buf)
-			if err != nil {
-				return p, fmt.Errorf("%w: cannot parse ack id: %s", ErrParsePacket, err)
-			}
-			p.ACKs[i] = model.PacketID(val)
-		}
-
-		// remote session id
-		if ackArrayLen > 0 {
-			if _, err = io.ReadFull(buf, p.RemoteSessionID[:]); err != nil {
-				return p, fmt.Errorf("%w: bad remote sessionID: %s", ErrParsePacket, err)
-			}
-		}
-
-		// packet id
-		if p.Opcode != model.P_ACK_V1 {
-			val, err := bytesx.ReadUint32(buf)
-			if err != nil {
-				return p, fmt.Errorf("%w: bad packetID: %s", ErrParsePacket, err)
-			}
-			p.ID = model.PacketID(val)
-		}
-
-		// payload
-		p.Payload = buf.Bytes()
-
-		// Now calculate the hmac digest over the parsed packet, and confirm it
-		// matches what we recieved from the server. Invalid digest could indicate
-		// that the server is not in possession of pre-shared key OR packet contents
-		// has been tampered with
-		hmacWant := GeneratePacketHMAC(*packetAuth.RemoteDigestKey, p)
-		if err != nil {
-			return p, fmt.Errorf("%w: %s", ErrParsePacket, err)
-		}
-
-		if hmacGot != hmacWant {
-			return p, fmt.Errorf("%w: packet digest (hmac) is not valid", ErrParsePacket)
-		}
-
-	case ControlSecurityModeTLSCrypt, ControlSecurityModeTLSCryptV2:
-		// replay packet id
-		replayId, err := bytesx.ReadUint32(buf)
-		if err != nil {
-			return p, fmt.Errorf("%w: bad replay packet id (tls-auth): %s", ErrParsePacket, err)
-		}
-		p.ReplayPacketID = model.PacketID(replayId)
-
-		// timestamp
-		timestamp, err := bytesx.ReadUint32(buf)
-		if err != nil {
-			return p, fmt.Errorf("%w: bad packet timestamp (tls-auth): %s", ErrParsePacket, err)
-		}
-		p.PacketTimestamp = model.PacketTimestamp(timestamp)
-
-		// The HMAC digest that was included with the received packet
-		var hmacGot SHA256HMACDigest
-		if _, err := io.ReadFull(buf, hmacGot[:]); err != nil {
-			return p, fmt.Errorf("%w: bad packet digest (tls-crypt): %s", ErrParsePacket, err)
-		}
-
-		ct, err := io.ReadAll(buf)
-		if err != nil {
-			return p, fmt.Errorf("%w: %s", ErrParsePacket, err)
-		}
-
-		body, err := DecryptControlMessage(hmacGot, *packetAuth.RemoteCipherKey, ct)
-		if err != nil {
-			return p, fmt.Errorf("%w: %s", ErrParsePacket, err)
-		}
-
-		buf := bytes.NewBuffer(body)
-		// ack array length
-		ackArrayLenByte, err := buf.ReadByte()
-		if err != nil {
-			return p, fmt.Errorf("%w: bad ack: %s", ErrParsePacket, err)
-		}
-		ackArrayLen := int(ackArrayLenByte)
-
-		// ack array
-		p.ACKs = make([]model.PacketID, ackArrayLen)
-		for i := 0; i < ackArrayLen; i++ {
-			val, err := bytesx.ReadUint32(buf)
-			if err != nil {
-				return p, fmt.Errorf("%w: cannot parse ack id: %s", ErrParsePacket, err)
-			}
-			p.ACKs[i] = model.PacketID(val)
-		}
-
-		// remote session id
-		if ackArrayLen > 0 {
-			if _, err = io.ReadFull(buf, p.RemoteSessionID[:]); err != nil {
-				return p, fmt.Errorf("%w: bad remote sessionID: %s", ErrParsePacket, err)
-			}
-		}
-
-		// packet id
-		if p.Opcode != model.P_ACK_V1 {
-			val, err := bytesx.ReadUint32(buf)
-			if err != nil {
-				return p, fmt.Errorf("%w: bad packetID: %s", ErrParsePacket, err)
-			}
-			p.ID = model.PacketID(val)
-		}
-
-		// payload
-		p.Payload = buf.Bytes()
-
-		// Now calculate the hmac digest over the parsed packet, and confirm it
-		// matches what we recieved from the server. Invalid digest could indicate
-		// that the server is not in possession of pre-shared key OR packet contents
-		// has been tampered with
-		hmacWant := GeneratePacketHMACTLSCrypt(*packetAuth.RemoteDigestKey, p)
-		if err != nil {
-			return p, fmt.Errorf("%w: %s", ErrParsePacket, err)
-		}
-
-		if hmacGot != hmacWant {
-			return p, fmt.Errorf("%w: packet digest (hmac) is not valid", ErrParsePacket)
-		}
-
-	}
-
-	return p, nil
 }
 
 // UnmarshalPacket produces a packet after parsing the common header. We assume that
@@ -383,4 +128,215 @@ func UnmarshalPacket(buf []byte, packetAuth *ControlChannelSecurity) (*model.Pac
 		Payload:         payload,
 	}
 	return p, nil
+}
+
+// parseControlOrACKPacket parses the contents of a control or ACK packet.
+func parseControlOrACKPacket(opcode model.Opcode, keyID byte, payload []byte, packetAuth *ControlChannelSecurity) (*model.Packet, error) {
+	// make sure we have payload to parse and we're parsing control or ACK
+	if len(payload) <= 0 {
+		return nil, ErrEmptyPayload
+	}
+	if !opcode.IsControl() && opcode != model.P_ACK_V1 {
+		return nil, fmt.Errorf("%w: %s", ErrParsePacket, "expected control/ack packet")
+	}
+
+	// create a buffer for parsing the packet
+	buf := bytes.NewBuffer(payload)
+	p := model.NewPacket(opcode, keyID, payload)
+
+	// local session id
+	if _, err := io.ReadFull(buf, p.LocalSessionID[:]); err != nil {
+		return p, fmt.Errorf("%w: bad sessionID: %s", ErrParsePacket, err)
+	}
+
+	switch packetAuth.Mode {
+	case ControlSecurityModeNone:
+		if err := readControlMessage(p, buf); err != nil {
+			return p, err
+		}
+	case ControlSecurityModeTLSAuth:
+		var digestGot SHA1HMACDigest
+		if _, err := io.ReadFull(buf, digestGot[:]); err != nil {
+			return p, fmt.Errorf("%w: %s", ErrParsePacket, err)
+		}
+
+		if err := readReplayProtection(p, buf); err != nil {
+			return p, err
+		}
+		if err := readControlMessage(p, buf); err != nil {
+			return p, err
+		}
+
+		// Now calculate the hmac digest over the parsed packet, and confirm it
+		// matches what we recieved from the server. Invalid digest could indicate
+		// that the server is not in possession of pre-shared key OR packet contents
+		// has been tampered with
+		match, err := validateTLSAuthDigest(p, packetAuth.RemoteDigestKey, &digestGot)
+		if err != nil || !match {
+			return p, fmt.Errorf("%w: packet digest (hmac) is not valid", ErrParsePacket)
+		}
+
+	case ControlSecurityModeTLSCrypt, ControlSecurityModeTLSCryptV2:
+		if err := readReplayProtection(p, buf); err != nil {
+			return p, err
+		}
+
+		// The HMAC digest that was included with the received packet
+		var hmacGot SHA256HMACDigest
+		if _, err := io.ReadFull(buf, hmacGot[:]); err != nil {
+			return p, fmt.Errorf("%w: bad packet digest (tls-crypt): %s", ErrParsePacket, err)
+		}
+
+		ct, err := io.ReadAll(buf)
+		if err != nil {
+			return p, fmt.Errorf("%w: %s", ErrParsePacket, err)
+		}
+
+		body, err := DecryptControlMessage(hmacGot, *packetAuth.RemoteCipherKey, ct)
+		if err != nil {
+			return p, fmt.Errorf("%w: %s", ErrParsePacket, err)
+		}
+
+		buf := bytes.NewBuffer(body)
+		if err := readControlMessage(p, buf); err != nil {
+			return p, err
+		}
+
+		// Now calculate the hmac digest over the parsed packet, and confirm it
+		// matches what we recieved from the server. Invalid digest could indicate
+		// that the server is not in possession of pre-shared key OR packet contents
+		// has been tampered with
+		match, err := validateTLSCryptDigest(p, packetAuth.RemoteDigestKey, hmacGot)
+		if err != nil || !match {
+			return p, fmt.Errorf("%w: packet digest (hmac) is not valid", ErrParsePacket)
+		}
+	}
+
+	return p, nil
+}
+
+func validateTLSAuthDigest(p *model.Packet, key *ControlChannelKey, got *SHA1HMACDigest) (bool, error) {
+	header := headerBytes(p)
+	replay := replayProtectionBytes(p)
+	ctrl, err := controlMessageBytes(p)
+	if err != nil {
+		return false, err
+	}
+
+	want := GenerateTLSAuthDigest(key, header, replay, ctrl)
+	return *got == want, nil
+
+}
+
+// Also performs validation of the digest
+func validateTLSCryptDigest(p *model.Packet, key *ControlChannelKey, got SHA256HMACDigest) (bool, error) {
+	header := headerBytes(p)
+	replay := replayProtectionBytes(p)
+	ctrl, err := controlMessageBytes(p)
+	if err != nil {
+		return false, err
+	}
+
+	want := GenerateTLSCryptDigest(key, header, replay, ctrl)
+	return got == want, nil
+
+}
+
+func headerBytes(p *model.Packet) []byte {
+	buf := &bytes.Buffer{}
+	buf.WriteByte((byte(p.Opcode) << 3) | (p.KeyID & 0x07))
+	buf.Write(p.LocalSessionID[:])
+	return buf.Bytes()
+}
+
+// ReplayProtection refers to (ReplayPacketID, Timestamp)
+// these fields are used by the server to reject packets that have
+// already been processed.
+func replayProtectionBytes(p *model.Packet) []byte {
+	buf := &bytes.Buffer{}
+	bytesx.WriteUint32(buf, uint32(p.ReplayPacketID))
+	bytesx.WriteUint32(buf, uint32(p.Timestamp))
+	return buf.Bytes()
+}
+
+func readReplayProtection(p *model.Packet, buf *bytes.Buffer) error {
+	// replay packet id
+	replayId, err := bytesx.ReadUint32(buf)
+	if err != nil {
+		return fmt.Errorf("%w: bad replay packet id (tls-auth): %s", ErrParsePacket, err)
+	}
+	p.ReplayPacketID = model.PacketID(replayId)
+
+	// timestamp
+	timestamp, err := bytesx.ReadUint32(buf)
+	if err != nil {
+		return fmt.Errorf("%w: bad packet timestamp (tls-auth): %s", ErrParsePacket, err)
+	}
+	p.Timestamp = model.PacketTimestamp(timestamp)
+
+	return nil
+}
+
+// ControlMessage refers to (len(ACKs), ACKs[], RemoteSessionID, ID, Payload)
+// it is also the segment of the packet that is encrypted when tls-crypt(-v2)
+// operation modes are used
+func controlMessageBytes(p *model.Packet) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	nAcks := len(p.ACKs)
+	if nAcks > math.MaxUint8 {
+		return buf.Bytes(), fmt.Errorf("%w: too many ACKs", ErrMarshalPacket)
+	}
+	buf.WriteByte(byte(nAcks))
+	for i := 0; i < nAcks; i++ {
+		bytesx.WriteUint32(buf, uint32(p.ACKs[i]))
+	}
+	// remote session id
+	if len(p.ACKs) > 0 {
+		buf.Write(p.RemoteSessionID[:])
+	}
+	if p.Opcode != model.P_ACK_V1 {
+		// Message-level pet id
+		bytesx.WriteUint32(buf, uint32(p.ID))
+		buf.Write(p.Payload)
+	}
+	return buf.Bytes(), nil
+}
+
+func readControlMessage(p *model.Packet, buf *bytes.Buffer) error {
+	// ack array length
+	ackArrayLenByte, err := buf.ReadByte()
+	if err != nil {
+		return fmt.Errorf("%w: bad ack: %s", ErrParsePacket, err)
+	}
+	ackArrayLen := int(ackArrayLenByte)
+
+	// ack array
+	p.ACKs = make([]model.PacketID, ackArrayLen)
+	for i := 0; i < ackArrayLen; i++ {
+		val, err := bytesx.ReadUint32(buf)
+		if err != nil {
+			return fmt.Errorf("%w: cannot parse ack id: %s", ErrParsePacket, err)
+		}
+		p.ACKs[i] = model.PacketID(val)
+	}
+
+	// remote session id
+	if ackArrayLen > 0 {
+		if _, err = io.ReadFull(buf, p.RemoteSessionID[:]); err != nil {
+			return fmt.Errorf("%w: bad remote sessionID: %s", ErrParsePacket, err)
+		}
+	}
+
+	// packet id
+	if p.Opcode != model.P_ACK_V1 {
+		val, err := bytesx.ReadUint32(buf)
+		if err != nil {
+			return fmt.Errorf("%w: bad packetID: %s", ErrParsePacket, err)
+		}
+		p.ID = model.PacketID(val)
+	}
+
+	// payload
+	p.Payload = buf.Bytes()
+	return nil
 }
